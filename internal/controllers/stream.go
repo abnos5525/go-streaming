@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -15,11 +16,17 @@ func playPage(id string) string {
 <meta charset="utf-8">
 <style>
 body{margin:0;background:#111;color:#eee;font:13px sans-serif}
-#meta{position:absolute;top:8px;left:8px;z-index:1;background:#000c;padding:8px 10px;max-width:48%;max-height:40%;overflow:auto;white-space:pre-wrap}
+#stage{position:relative}
 video{width:100%;background:#000;display:block}
+#boxes{position:absolute;inset:0;pointer-events:none}
+.box{position:absolute;border:2px solid #0f0;color:#0f0;font:12px sans-serif;white-space:nowrap;text-shadow:0 0 2px #000}
+#meta{position:absolute;top:8px;left:8px;z-index:2;background:#000c;padding:8px 10px;max-width:48%;max-height:30%;overflow:auto}
 </style>
-<pre id="meta">metadata…</pre>
+<div id="stage">
 <video id="v" autoplay playsinline muted controls></video>
+<div id="boxes"></div>
+</div>
+<pre id="meta">metadata…</pre>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
 <script>
 const v = document.getElementById('v');
@@ -31,20 +38,36 @@ if (window.Hls && Hls.isSupported()) {
 } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
   v.src = src;
 }
-function line(t){
-  const size = t.width ? t.width+'x'+t.height : '';
-  return [t.type, t.codec, size, t.fps, t.handler].filter(Boolean).join('  ');
+function draw(m){
+  const rows = (m.tracks||[]).map(t => [t.type,t.codec,t.width&&(t.width+'x'+t.height),t.fps].filter(Boolean).join(' '));
+  const ai = m.ai;
+  if (ai && ai.results) {
+    rows.push((ai.results||[]).map(r => r.model).filter(Boolean).join(', '));
+  }
+  document.getElementById('meta').textContent = rows.join('\n') || 'no stream tracks yet';
+  const boxes = document.getElementById('boxes');
+  boxes.innerHTML = '';
+  const w = v.videoWidth || (m.tracks&&m.tracks[0]&&m.tracks[0].width) || 1;
+  const h = v.videoHeight || (m.tracks&&m.tracks[0]&&m.tracks[0].height) || 1;
+  for (const r of (ai&&ai.results)||[]) {
+    for (const o of r.objects||[]) {
+      const b = o.bbox; if (!b) continue;
+      const d = document.createElement('div');
+      d.className = 'box';
+      d.style.left = (b.x/w*100)+'%';
+      d.style.top = (b.y/h*100)+'%';
+      d.style.width = (b.width/w*100)+'%';
+      d.style.height = (b.height/h*100)+'%';
+      d.textContent = (o.object_type_name||r.model||'')+' '+Math.round((o.confidence||0)*100)+'%';
+      boxes.appendChild(d);
+    }
+  }
 }
 function poll(){
-  fetch('/stream/meta/` + id + `').then(r=>r.json()).then(m=>{
-    const rows = (m.tracks||[]).map(line);
-    if (m.payloads && m.payloads.length) rows.push('rtp pt '+m.payloads.join(','));
-    if (m.ai) rows.push(m.ai);
-    document.getElementById('meta').textContent = rows.join('\n') || 'no stream tracks yet';
-  }).catch(()=>{});
+  fetch('/stream/meta/` + id + `').then(r=>r.json()).then(draw).catch(()=>{});
 }
 poll();
-setInterval(poll, 2000);
+setInterval(poll, 500);
 </script>`
 }
 
@@ -69,6 +92,19 @@ func registerStream(r *gin.Engine) {
 			return
 		}
 		c.JSON(http.StatusOK, m)
+	})
+	r.POST("/stream/ai/:id", func(c *gin.Context) {
+		id := c.Param("id")
+		b, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"message": err.Error()})
+			return
+		}
+		if err := stream.PutAI(id, b); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "ok"})
 	})
 	r.POST("/stream/start", func(c *gin.Context) {
 		var req struct {

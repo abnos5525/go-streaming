@@ -69,6 +69,23 @@ func TestRtpPacketAndAI(t *testing.T) {
 	}
 }
 
+func TestParseAIFrame(t *testing.T) {
+	raw := []byte(`{"camera":{"id":"x"},"frame":{"timestamp":1},"results":[{"model":"FaceAnalysis","objects":[{"bbox":{"x":50,"y":50,"width":100,"height":100},"confidence":0.8,"object_type_name":"face"}]}],"type_message":6}`)
+	f := parseAI(raw)
+	if f == nil || f.Results[0].Model != "FaceAnalysis" || f.Results[0].Objects[0].Name != "face" {
+		t.Fatal(f)
+	}
+	var buf []byte
+	mid := len(raw) / 2
+	if feedJSON(&buf, raw[:mid]) != nil {
+		t.Fatal("early")
+	}
+	got := feedJSON(&buf, raw[mid:])
+	if got == nil || got.TypeMessage != 6 {
+		t.Fatal(got)
+	}
+}
+
 func TestTracksFromProbe(t *testing.T) {
 	got := tracksFromProbe([]byte(`{"streams":[
 		{"codec_type":"video","codec_name":"h264","width":1920,"height":1080,"r_frame_rate":"25/1","tags":{"handler_name":"Video"}},

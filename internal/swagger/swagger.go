@@ -46,8 +46,8 @@ type streamMeta struct {
 	Ready   bool          `json:"ready"`
 	Error    string        `json:"error,omitempty"`
 	Tracks   []streamTrack `json:"tracks,omitempty"`
-	Payloads []int         `json:"payloads,omitempty"`
-	AI       string        `json:"ai,omitempty"`
+	Payloads []int `json:"payloads,omitempty"`
+	AI       any   `json:"ai,omitempty"`
 }
 
 func spec() []byte {

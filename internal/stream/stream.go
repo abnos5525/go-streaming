@@ -33,7 +33,7 @@ type session struct {
 	running       bool
 	tracks        []Track
 	pts           map[int]struct{}
-	ai            string
+	frame         *AIFrame
 }
 
 type Track struct {
@@ -45,15 +45,46 @@ type Track struct {
 	FPS     string `json:"fps,omitempty"`
 }
 
+type BBox struct {
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
+}
+
+type AIObject struct {
+	BBox       BBox    `json:"bbox"`
+	Confidence float64 `json:"confidence,omitempty"`
+	Name       string  `json:"object_type_name,omitempty"`
+	TrackID    int     `json:"track_id,omitempty"`
+}
+
+type AIResult struct {
+	Model      string         `json:"model,omitempty"`
+	Objects    []AIObject     `json:"objects,omitempty"`
+	Attributes map[string]any `json:"attributes,omitempty"`
+}
+
+type AIFrame struct {
+	Camera struct {
+		ID string `json:"id"`
+	} `json:"camera"`
+	Frame struct {
+		Timestamp int64 `json:"timestamp"`
+	} `json:"frame"`
+	Results     []AIResult `json:"results"`
+	TypeMessage int        `json:"type_message,omitempty"`
+}
+
 type Meta struct {
-	URL     string  `json:"url"`
-	RTSP    string  `json:"rtsp"`
-	Started bool    `json:"started"`
-	Ready   bool    `json:"ready"`
-	Error    string  `json:"error,omitempty"`
-	Tracks   []Track `json:"tracks,omitempty"`
-	Payloads []int   `json:"payloads,omitempty"`
-	AI       string  `json:"ai,omitempty"`
+	URL      string   `json:"url"`
+	RTSP     string   `json:"rtsp"`
+	Started  bool     `json:"started"`
+	Ready    bool     `json:"ready"`
+	Error    string   `json:"error,omitempty"`
+	Tracks   []Track  `json:"tracks,omitempty"`
+	Payloads []int    `json:"payloads,omitempty"`
+	AI       *AIFrame `json:"ai,omitempty"`
 }
 
 var (
@@ -90,7 +121,27 @@ func (s *session) meta() Meta {
 		pts = append(pts, p)
 	}
 	sort.Ints(pts)
-	return Meta{URL: s.playlist(), RTSP: s.url, Started: s.running, Ready: err == nil, Error: s.last, Tracks: s.tracks, Payloads: pts, AI: s.ai}
+	return Meta{URL: s.playlist(), RTSP: s.url, Started: s.running, Ready: err == nil, Error: s.last, Tracks: s.tracks, Payloads: pts, AI: s.frame}
+}
+
+func PutAI(id string, body []byte) error {
+	f := parseAI(body)
+	if f == nil {
+		var buf []byte
+		f = feedJSON(&buf, body)
+	}
+	if f == nil {
+		return fmt.Errorf("invalid ai json")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, s := range sessions {
+		if s.id == id {
+			s.frame = f
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown stream")
 }
 
 func ByID(id string) (Meta, bool) {
@@ -203,6 +254,39 @@ func multicastURL(raw string) *url.URL {
 	return u
 }
 
+func parseAI(raw []byte) *AIFrame {
+	var f AIFrame
+	if json.Unmarshal(raw, &f) != nil || len(f.Results) == 0 {
+		return nil
+	}
+	return &f
+}
+
+func feedJSON(buf *[]byte, chunk []byte) *AIFrame {
+	*buf = append(*buf, chunk...)
+	i := bytes.IndexByte(*buf, '{')
+	if i < 0 {
+		if len(*buf) > 8192 {
+			*buf = (*buf)[:0]
+		}
+		return nil
+	}
+	if i > 0 {
+		*buf = (*buf)[i:]
+	}
+	dec := json.NewDecoder(bytes.NewReader(*buf))
+	var raw json.RawMessage
+	if err := dec.Decode(&raw); err != nil {
+		if len(*buf) > 512<<10 {
+			*buf = (*buf)[:0]
+		}
+		return nil
+	}
+	rest := (*buf)[int(dec.InputOffset()):]
+	*buf = append([]byte(nil), rest...)
+	return parseAI(raw)
+}
+
 func rtpSDP(u *url.URL) string {
 	return fmt.Sprintf("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=stream\nc=IN IP4 %s\nt=0 0\nm=video %s RTP/AVP 96\na=rtpmap:96 H264/90000\n", u.Hostname(), u.Port())
 }
@@ -290,17 +374,6 @@ func printableAI(b []byte) string {
 		return ""
 	}
 	return clipAI(string(b[start:]))
-}
-
-func payloadAI(pt int, b []byte) string {
-	if t := printableAI(b); t != "" {
-		return t
-	}
-	n := len(b)
-	if n > 24 {
-		n = 24
-	}
-	return fmt.Sprintf("pt %d (%d bytes) %x", pt, len(b), b[:n])
 }
 
 func h264AI(payload []byte, fu *[]byte) string {
@@ -516,17 +589,18 @@ func wipe(id string) {
 	_ = os.MkdirAll(filepath.Join(dir, id), 0o755)
 }
 
-func (s *session) note(pt int, ai string) {
+func (s *session) note(pt int) {
 	mu.Lock()
 	if s.pts == nil {
 		s.pts = map[int]struct{}{}
 	}
 	s.pts[pt] = struct{}{}
-	if ai != "" {
-		if s.ai == "" || strings.HasPrefix(ai, "{") || strings.HasPrefix(ai, "<") {
-			s.ai = ai
-		}
-	}
+	mu.Unlock()
+}
+
+func (s *session) setFrame(f *AIFrame) {
+	mu.Lock()
+	s.frame = f
 	mu.Unlock()
 }
 
@@ -543,7 +617,7 @@ func (s *session) sniff(my int, mc *net.UDPConn, relay int) {
 	}
 	defer out.Close()
 	buf := make([]byte, 2048)
-	var fu []byte
+	var fu, acc []byte
 	for {
 		if !s.alive(my) {
 			return
@@ -559,17 +633,24 @@ func (s *session) sniff(my int, mc *net.UDPConn, relay int) {
 		pkt := buf[:n]
 		pt, payload, ok := rtpPacket(pkt)
 		if !ok {
+			if f := feedJSON(&acc, pkt); f != nil {
+				s.setFrame(f)
+			}
 			continue
 		}
-		s.note(pt, "")
+		s.note(pt)
 		if pt == 96 {
 			if t := h264AI(payload, &fu); t != "" {
-				s.note(pt, t)
+				if f := parseAI([]byte(t)); f != nil {
+					s.setFrame(f)
+				}
 			}
 			_, _ = out.Write(pkt)
 			continue
 		}
-		s.note(pt, payloadAI(pt, payload))
+		if f := feedJSON(&acc, payload); f != nil {
+			s.setFrame(f)
+		}
 	}
 }
 
