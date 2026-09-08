@@ -281,16 +281,10 @@ func (s *session) loop(my int) {
 		} else {
 			in = p
 		}
-	} else {
-		go func() {
-			tr := probe(s.url)
-			mu.Lock()
-			s.tracks = tr
-			mu.Unlock()
-		}()
 	}
 	log.Printf("hls %s input %s", s.id, in)
 	out := filepath.Join(dir, s.id, "index.m3u8")
+	go s.probeWhenReady(my, out)
 	for {
 		if !s.alive(my) {
 			return
@@ -359,6 +353,23 @@ func wipe(id string) {
 	_ = os.MkdirAll(filepath.Join(dir, id), 0o755)
 }
 
+func (s *session) probeWhenReady(my int, playlist string) {
+	for i := 0; i < 45; i++ {
+		if !s.alive(my) {
+			return
+		}
+		if _, err := os.Stat(playlist); err == nil {
+			if tr := probe(playlist); len(tr) > 0 {
+				mu.Lock()
+				s.tracks = tr
+				mu.Unlock()
+				return
+			}
+		}
+		time.Sleep(time.Second)
+	}
+}
+
 func probe(raw string) []Track {
 	in := ffmpegInput(raw)
 	args := []string{"-v", "error"}
@@ -366,7 +377,7 @@ func probe(raw string) []Track {
 	if strings.HasPrefix(low, "rtsp://") || strings.HasPrefix(low, "rtsps://") {
 		args = append(args, "-rtsp_transport", "tcp")
 	} else {
-		args = append(args, "-protocol_whitelist", "file,udp,rtp,crypto")
+		args = append(args, "-protocol_whitelist", "file,udp,rtp,crypto", "-allowed_extensions", "ALL")
 	}
 	args = append(args, "-show_streams", "-of", "json", "-i", in)
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
