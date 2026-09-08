@@ -64,6 +64,12 @@ func TestRtpPacketAndAI(t *testing.T) {
 	}
 }
 
+func TestSplitAnnexBNoPanic(t *testing.T) {
+	extractAI(make([]byte, 0x280))
+	splitAnnexB([]byte{0, 0, 1})
+	splitAnnexB([]byte{1, 2, 3, 4})
+}
+
 func TestSEIJSON(t *testing.T) {
 	js := []byte(`{"camera":{"id":"x"},"frame":{"timestamp":1},"results":[{"model":"FaceAnalysis","objects":[]}],"type_message":6}`)
 	p := append(make([]byte, 16), js...)

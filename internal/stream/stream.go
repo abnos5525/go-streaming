@@ -392,27 +392,43 @@ func nalAI(nal []byte) *AIFrame {
 	return seiAI(unescapeRBSP(nal[1:]))
 }
 
-func splitAnnexB(b []byte) [][]byte {
-	var out [][]byte
-	i := 0
-	for i < len(b) {
-		for i+3 <= len(b) && !(b[i] == 0 && b[i+1] == 0 && (b[i+2] == 1 || i+4 <= len(b) && b[i+2] == 0 && b[i+3] == 1)) {
-			i++
-		}
-		if i >= len(b) {
-			break
+func nextStart(b []byte, from int) int {
+	for i := from; i+2 < len(b); i++ {
+		if b[i] != 0 || b[i+1] != 0 {
+			continue
 		}
 		if b[i+2] == 1 {
-			i += 3
-		} else {
-			i += 4
+			return i
 		}
-		j := i
-		for j+3 <= len(b) && !(b[j] == 0 && b[j+1] == 0 && (b[j+2] == 1 || j+4 <= len(b) && b[j+2] == 0 && b[j+3] == 1)) {
-			j++
+		if i+3 < len(b) && b[i+2] == 0 && b[i+3] == 1 {
+			return i
 		}
-		if j > i {
-			out = append(out, b[i:j])
+	}
+	return -1
+}
+
+func splitAnnexB(b []byte) [][]byte {
+	var out [][]byte
+	i := nextStart(b, 0)
+	for i >= 0 {
+		sc := 3
+		if i+3 < len(b) && b[i+2] == 0 && b[i+3] == 1 {
+			sc = 4
+		}
+		nal := i + sc
+		if nal > len(b) {
+			break
+		}
+		j := nextStart(b, nal)
+		end := len(b)
+		if j >= 0 {
+			end = j
+		}
+		if end > nal {
+			out = append(out, b[nal:end])
+		}
+		if j < 0 {
+			break
 		}
 		i = j
 	}
