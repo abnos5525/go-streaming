@@ -42,6 +42,8 @@ type overlayCheck struct {
 	Packets  int            `json:"packets"`
 	Payloads []int          `json:"payloads,omitempty"`
 	NALs     map[string]int `json:"nals,omitempty"`
+	HEVC     bool           `json:"hevc"`
+	HEVCNALs map[string]int `json:"hevc_nals,omitempty"`
 	AIBoxes  int            `json:"ai_boxes"`
 	Source   any            `json:"source"`
 	HLS      any            `json:"hls"`

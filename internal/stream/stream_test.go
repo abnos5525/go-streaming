@@ -145,17 +145,21 @@ func TestNeonRuns(t *testing.T) {
 }
 
 func TestOverlayVerdict(t *testing.T) {
-	got := overlayVerdict(OverlayCheck{H264: true, AIBoxes: 11, Source: FrameSnap{Neon: 0}, HLS: FrameSnap{Neon: 0}})
-	if !strings.Contains(got, "not our pipeline") {
+	got := overlayVerdict(OverlayCheck{H264: true, AIBoxes: 11, NALs: map[string]int{"1": 1}, HLS: FrameSnap{Neon: 0}})
+	if !strings.Contains(got, "did not paint") && !strings.Contains(got, "no H265") {
 		t.Fatal(got)
 	}
-	got = overlayVerdict(OverlayCheck{H264: true, AIBoxes: 11, Source: FrameSnap{Neon: 20}, HLS: FrameSnap{Neon: 0}})
-	if !strings.Contains(got, "stripped") {
+	got = overlayVerdict(OverlayCheck{H264: true, AIBoxes: 11, HLS: FrameSnap{Neon: 20}})
+	if !strings.Contains(got, "painted") {
 		t.Fatal(got)
 	}
 	pkt := make([]byte, 2)
 	pkt[0], pkt[1] = 28, 5
 	if nalType(pkt) != 5 {
 		t.Fatal(nalType(pkt))
+	}
+	sps := []byte{0x42, 0x01}
+	if hevcType(sps) != 33 {
+		t.Fatal(hevcType(sps))
 	}
 }

@@ -41,6 +41,7 @@ type session struct {
 	frame         *AIFrame
 	pts           map[int]struct{}
 	nals          map[int]int
+	hevc          map[int]int
 	pkts          int
 }
 
@@ -725,14 +726,16 @@ func (s *session) sniff(my int, mc *net.UDPConn, relay int) {
 			continue
 		}
 		s.rtpTS.Store(ts)
+		s.notePkt(pt, nalType(payload), hevcType(payload))
+		if f := parseAI(payload); f != nil {
+			s.setFrame(f)
+		}
+		if f := hevcAI(payload); f != nil {
+			s.setFrame(f)
+		}
 		if pt != 96 {
-			s.notePkt(pt, 0)
-			if f := parseAI(payload); f != nil {
-				s.setFrame(f)
-			}
 			continue
 		}
-		s.notePkt(96, nalType(payload))
 		for _, nal := range h264NALs(payload, &fu) {
 			if f := nalAI(nal); f != nil {
 				s.setFrame(f)
@@ -809,7 +812,7 @@ func (s *session) set(msg string) {
 	mu.Unlock()
 }
 
-func (s *session) notePkt(pt, nal int) {
+func (s *session) notePkt(pt, nal, hevc int) {
 	mu.Lock()
 	s.pkts++
 	if s.pts == nil {
@@ -821,6 +824,12 @@ func (s *session) notePkt(pt, nal int) {
 			s.nals = map[int]int{}
 		}
 		s.nals[nal]++
+	}
+	if hevc == 32 || hevc == 33 || hevc == 34 || hevc == 39 || hevc == 40 {
+		if s.hevc == nil {
+			s.hevc = map[int]int{}
+		}
+		s.hevc[hevc]++
 	}
 	mu.Unlock()
 }
@@ -834,6 +843,32 @@ func nalType(p []byte) int {
 		return int(p[1] & 0x1f)
 	}
 	return t
+}
+
+func hevcType(p []byte) int {
+	if len(p) < 2 {
+		return 0
+	}
+	t := int(p[0]>>1) & 0x3f
+	if t == 49 && len(p) >= 3 {
+		return int(p[2]>>1) & 0x3f
+	}
+	return t
+}
+
+func hevcAI(p []byte) *AIFrame {
+	t := hevcType(p)
+	if t != 39 && t != 40 {
+		return nil
+	}
+	off := 2
+	if len(p) >= 3 && int(p[0]>>1)&0x3f == 49 {
+		off = 3
+	}
+	if off >= len(p) {
+		return nil
+	}
+	return seiAI(unescapeRBSP(p[off:]))
 }
 
 type FrameSnap struct {
@@ -850,6 +885,8 @@ type OverlayCheck struct {
 	Packets  int            `json:"packets"`
 	Payloads []int          `json:"payloads,omitempty"`
 	NALs     map[string]int `json:"nals,omitempty"`
+	HEVC     bool           `json:"hevc"`
+	HEVCNALs map[string]int `json:"hevc_nals,omitempty"`
 	AIBoxes  int            `json:"ai_boxes"`
 	Source   FrameSnap      `json:"source"`
 	HLS      FrameSnap      `json:"hls"`
@@ -872,7 +909,7 @@ func CheckOverlay(id string) (OverlayCheck, error) {
 		mu.Unlock()
 		return OverlayCheck{}, fmt.Errorf("unknown stream")
 	}
-	srcURL, pkts := s.url, s.pkts
+	pkts := s.pkts
 	var nbox int
 	if s.frame != nil {
 		for _, r := range s.frame.Results {
@@ -883,6 +920,10 @@ func CheckOverlay(id string) (OverlayCheck, error) {
 	for k, v := range s.nals {
 		nals[strconv.Itoa(k)] = v
 	}
+	hevc := map[string]int{}
+	for k, v := range s.hevc {
+		hevc[strconv.Itoa(k)] = v
+	}
 	var pts []int
 	for p := range s.pts {
 		pts = append(pts, p)
@@ -891,12 +932,12 @@ func CheckOverlay(id string) (OverlayCheck, error) {
 	sort.Ints(pts)
 
 	hlsPath := filepath.Join(dir, id, "snap.jpg")
-	srcPath := filepath.Join(dir, id, "src.jpg")
-	out := OverlayCheck{FFmpeg: "copy", Packets: pkts, Payloads: pts, NALs: nals, AIBoxes: nbox}
+	out := OverlayCheck{FFmpeg: "copy", Packets: pkts, Payloads: pts, NALs: nals, HEVCNALs: hevc, AIBoxes: nbox}
 	out.Codec, out.PixFmt = probeVideo(filepath.Join(dir, id, "index.m3u8"))
 	out.H264 = out.Codec == "h264" || nals["1"] > 0 || nals["7"] > 0
+	out.HEVC = out.Codec == "hevc" || hevc["32"] > 0 || hevc["33"] > 0 || hevc["34"] > 0
 	out.HLS = grabSnap(filepath.Join(dir, id, "index.m3u8"), hlsPath, "/hls/"+id+"/snap.jpg")
-	out.Source = grabSnap(ffmpegInput(srcURL), srcPath, "/hls/"+id+"/src.jpg")
+	out.Source = FrameSnap{Err: "skipped: we already own the multicast; ffmpeg copy so HLS pixels = camera"}
 	out.Verdict = overlayVerdict(out)
 	return out, nil
 }
@@ -905,19 +946,23 @@ func overlayVerdict(o OverlayCheck) string {
 	if !o.H264 {
 		return "not h264 (" + o.Codec + ") — check the camera, not overlay"
 	}
-	src, hls := o.Source.Neon, o.HLS.Neon
-	switch {
-	case o.AIBoxes == 0:
-		return "no AI JSON on this UDP"
-	case src == 0 && hls == 0:
-		return "AI JSON only. UDP source and our HLS both have no painted boxes — not our pipeline"
-	case src > 0 && hls == 0:
-		return "boxes on UDP source, missing on HLS — our ffmpeg/HLS stripped them"
-	case src == 0 && hls > 0:
-		return "boxes only after HLS — unexpected"
-	default:
-		return "boxes painted into the video (source and HLS)"
+	if o.HLS.Err != "" {
+		return "no HLS frame: " + o.HLS.Err
 	}
+	if o.AIBoxes == 0 {
+		return "no AI JSON on this UDP"
+	}
+	if o.HLS.Neon > 0 {
+		return "boxes painted into the video pixels"
+	}
+	hevc := "no H265 on this UDP (no HEVC VPS/SPS/PPS)"
+	if o.HEVC {
+		hevc = "H265 IS on this UDP, but HLS snap still has no overlay"
+	}
+	if o.NALs["6"] == 0 {
+		return "H264 copy, no SEI nal-6, HLS snap has no overlay. JSON is sidecar. " + hevc
+	}
+	return "H264 copy, SEI present, HLS snap has no overlay. JSON is data not pixels. " + hevc
 }
 
 func grabSnap(in, file, url string) FrameSnap {
