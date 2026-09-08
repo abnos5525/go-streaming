@@ -65,6 +65,13 @@ func TestRtpPacketAndAI(t *testing.T) {
 	if p := relayPort("e903d3fad593f281"); p < 30000 || p >= 50000 {
 		t.Fatal(p)
 	}
+	x := make([]byte, 20)
+	x[0], x[1] = 0x90, 96
+	x[12], x[13], x[15], x[16] = 0xbe, 0xde, 1, 0xaa
+	prof, data := rtpExt(x)
+	if prof != 0xbede || len(data) != 4 || data[0] != 0xaa {
+		t.Fatalf("ext %x %x", prof, data)
+	}
 }
 
 func TestH264NALsNoPanic(t *testing.T) {

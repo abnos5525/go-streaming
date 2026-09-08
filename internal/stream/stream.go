@@ -43,6 +43,9 @@ type session struct {
 	nals           map[int]int
 	hevc           map[int]int
 	pkts, ext, raw int
+	extProf        uint16
+	extPeek        string
+	extAI          bool
 }
 
 type Track struct {
@@ -514,6 +517,22 @@ func rtpPacket(b []byte) (pt int, ts uint32, payload []byte, ok bool) {
 	return int(b[1] & 0x7f), ts, payload, true
 }
 
+func rtpExt(b []byte) (uint16, []byte) {
+	if len(b) < 12 || b[0]>>6 != 2 || b[0]&0x10 == 0 {
+		return 0, nil
+	}
+	off := 12 + 4*int(b[0]&0x0f)
+	if len(b) < off+4 {
+		return 0, nil
+	}
+	prof := uint16(b[off])<<8 | uint16(b[off+1])
+	n := 4 * ((int(b[off+2]) << 8) | int(b[off+3]))
+	if n < 0 || len(b) < off+4+n {
+		return prof, nil
+	}
+	return prof, b[off+4 : off+4+n]
+}
+
 func ffmpegCmd(in, out string) *exec.Cmd {
 	args := []string{"-hide_banner", "-loglevel", "error"}
 	low := strings.ToLower(in)
@@ -729,9 +748,24 @@ func (s *session) sniff(my int, mc *net.UDPConn, relay int) {
 			continue
 		}
 		if pkt[0]&0x10 != 0 {
+			prof, data := rtpExt(pkt)
 			mu.Lock()
 			s.ext++
+			s.extProf = prof
+			if s.extPeek == "" && len(data) > 0 {
+				n := 24
+				if n > len(data) {
+					n = len(data)
+				}
+				s.extPeek = hex.EncodeToString(data[:n])
+			}
 			mu.Unlock()
+			if f := parseAI(data); f != nil {
+				mu.Lock()
+				s.extAI = true
+				mu.Unlock()
+				s.setFrame(f)
+			}
 		}
 		s.rtpTS.Store(ts)
 		s.notePkt(pt, nalType(payload), hevcNAL(payload))
@@ -917,10 +951,13 @@ type OverlayCheck struct {
 }
 
 type Other struct {
-	RTPExt  int      `json:"rtp_ext"`
-	NonRTP  int      `json:"non_rtp"`
-	Streams []string `json:"streams,omitempty"`
-	TS      []string `json:"ts_hints,omitempty"`
+	RTPExt     int      `json:"rtp_ext"`
+	ExtProfile string   `json:"ext_profile,omitempty"`
+	ExtPeek    string   `json:"ext_peek,omitempty"`
+	ExtAI      bool     `json:"ext_ai"`
+	NonRTP     int      `json:"non_rtp"`
+	Streams    []string `json:"streams,omitempty"`
+	TS         []string `json:"ts_hints,omitempty"`
 }
 
 func CheckOverlay(id string) (OverlayCheck, error) {
@@ -940,6 +977,7 @@ func CheckOverlay(id string) (OverlayCheck, error) {
 		return OverlayCheck{}, fmt.Errorf("unknown stream")
 	}
 	pkts, ext, raw := s.pkts, s.ext, s.raw
+	extProf, extPeek, extAI := s.extProf, s.extPeek, s.extAI
 	var nbox int
 	var objs []AIObject
 	if s.frame != nil {
@@ -970,7 +1008,7 @@ func CheckOverlay(id string) (OverlayCheck, error) {
 	out.HEVC = out.Codec == "hevc" || (hevc["33"] > 0 && (hevc["32"] > 0 || hevc["34"] > 0))
 	out.HLS = grabSnap(filepath.Join(dir, id, "index.m3u8"), hlsPath, "/hls/"+id+"/snap.jpg", objs)
 	out.Source = FrameSnap{Err: "skipped: we already own the multicast; ffmpeg copy so HLS pixels = camera"}
-	out.Other = Other{RTPExt: ext, NonRTP: raw, Streams: probeAll(filepath.Join(dir, id, "index.m3u8")), TS: tsHints(id)}
+	out.Other = Other{RTPExt: ext, ExtProfile: fmt.Sprintf("%04x", extProf), ExtPeek: extPeek, ExtAI: extAI, NonRTP: raw, Streams: probeAll(filepath.Join(dir, id, "index.m3u8")), TS: tsHints(id)}
 	out.Verdict = overlayVerdict(out)
 	return out, nil
 }
@@ -991,11 +1029,11 @@ func overlayVerdict(o OverlayCheck) string {
 	if o.HLS.Edge >= 0.35 {
 		return "possible painted boxes (any color) at JSON bbox edges — look at snap.jpg"
 	}
+	if o.Other.ExtAI {
+		return "AI JSON also in RTP header extension (data, not pixels). HLS snap has no overlay"
+	}
 	if len(o.Other.TS) > 0 {
 		return "extra in MPEG-TS: " + strings.Join(o.Other.TS, ",") + " — not pixel overlay"
-	}
-	if o.Other.RTPExt > 0 {
-		return "RTP header extensions present (metadata, not pixels). HLS snap has no overlay"
 	}
 	hevc := "no H265 on this UDP (no HEVC VPS/SPS/PPS)"
 	if o.HEVC {
