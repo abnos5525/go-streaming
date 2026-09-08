@@ -1,0 +1,275 @@
+{
+    "camera": {
+        "id": "78e2c0e5-8dcd-450f-9b4d-3e1e69000000"
+    },
+    "frame": {
+        "timestamp": 1788864709102
+    },
+    "results": [
+        {
+            "event_type": "",
+            "model": "FaceAnalysis",
+            "objects": [
+                {
+                    "bbox": {
+                        "height": 100,
+                        "width": 100,
+                        "x": 50,
+                        "y": 50
+                    },
+                    "confidence": 0.800000011920929,
+                    "object_type_id": 80,
+                    "object_type_name": "face",
+                    "track_id": 0
+                },
+                {
+                    "bbox": {
+                        "height": 100,
+                        "width": 100,
+                        "x": 50,
+                        "y": 50
+                    },
+                    "confidence": 0.800000011920929,
+                    "object_type_id": 80,
+                    "object_type_name": "face",
+                    "track_id": 0
+                },
+                {
+                    "bbox": {
+                        "height": 100,
+                        "width": 100,
+                        "x": 50,
+                        "y": 50
+                    },
+                    "confidence": 0.800000011920929,
+                    "object_type_id": 80,
+                    "object_type_name": "face",
+                    "track_id": 0
+                },
+                {
+                    "bbox": {
+                        "height": 100,
+                        "width": 100,
+                        "x": 50,
+                        "y": 50
+                    },
+                    "confidence": 0.800000011920929,
+                    "object_type_id": 80,
+                    "object_type_name": "face",
+                    "track_id": 0
+                },
+                {
+                    "bbox": {
+                        "height": 100,
+                        "width": 100,
+                        "x": 50,
+                        "y": 50
+                    },
+                    "confidence": 0.800000011920929,
+                    "object_type_id": 80,
+                    "object_type_name": "face",
+                    "track_id": 0
+                },
+                {
+                    "bbox": {
+                        "height": 100,
+                        "width": 100,
+                        "x": 50,
+                        "y": 50
+                    },
+                    "confidence": 0.800000011920929,
+                    "object_type_id": 80,
+                    "object_type_name": "face",
+                    "track_id": 0
+                },
+                {
+                    "bbox": {
+                        "height": 100,
+                        "width": 100,
+                        "x": 50,
+                        "y": 50
+                    },
+                    "confidence": 0.800000011920929,
+                    "object_type_id": 80,
+                    "object_type_name": "face",
+                    "track_id": 0
+                },
+                {
+                    "bbox": {
+                        "height": 100,
+                        "width": 100,
+                        "x": 50,
+                        "y": 50
+                    },
+                    "confidence": 0.800000011920929,
+                    "object_type_id": 80,
+                    "object_type_name": "face",
+                    "track_id": 0
+                },
+                {
+                    "bbox": {
+                        "height": 100,
+                        "width": 100,
+                        "x": 50,
+                        "y": 50
+                    },
+                    "confidence": 0.800000011920929,
+                    "object_type_id": 80,
+                    "object_type_name": "face",
+                    "track_id": 0
+                },
+                {
+                    "bbox": {
+                        "height": 100,
+                        "width": 100,
+                        "x": 50,
+                        "y": 50
+                    },
+                    "confidence": 0.800000011920929,
+                    "object_type_id": 80,
+                    "object_type_name": "face",
+                    "track_id": 0
+                }
+            ],
+            "source_id": ""
+        },
+        {
+            "attributes": {
+                "motionDetected": false,
+                "motionScore": 0
+            },
+            "event_type": "",
+            "model": "MotionDetection",
+            "objects": [],
+            "source_id": ""
+        },
+        {
+            "event_type": "",
+            "model": "ObjectDetection",
+            "objects": [
+                {
+                    "bbox": {
+                        "height": 200,
+                        "width": 200,
+                        "x": 100,
+                        "y": 100
+                    },
+                    "confidence": 0.800000011920929,
+                    "object_type_id": 0,
+                    "object_type_name": "person",
+                    "track_id": 0
+                },
+                {
+                    "bbox": {
+                        "height": 200,
+                        "width": 200,
+                        "x": 100,
+                        "y": 100
+                    },
+                    "confidence": 0.800000011920929,
+                    "object_type_id": 0,
+                    "object_type_name": "person",
+                    "track_id": 0
+                },
+                {
+                    "bbox": {
+                        "height": 200,
+                        "width": 200,
+                        "x": 100,
+                        "y": 100
+                    },
+                    "confidence": 0.800000011920929,
+                    "object_type_id": 0,
+                    "object_type_name": "person",
+                    "track_id": 0
+                },
+                {
+                    "bbox": {
+                        "height": 200,
+                        "width": 200,
+                        "x": 100,
+                        "y": 100
+                    },
+                    "confidence": 0.800000011920929,
+                    "object_type_id": 0,
+                    "object_type_name": "person",
+                    "track_id": 0
+                },
+                {
+                    "bbox": {
+                        "height": 200,
+                        "width": 200,
+                        "x": 100,
+                        "y": 100
+                    },
+                    "confidence": 0.800000011920929,
+                    "object_type_id": 0,
+                    "object_type_name": "person",
+                    "track_id": 0
+                },
+                {
+                    "bbox": {
+                        "height": 200,
+                        "width": 200,
+                        "x": 100,
+                        "y": 100
+                    },
+                    "confidence": 0.800000011920929,
+                    "object_type_id": 0,
+                    "object_type_name": "person",
+                    "track_id": 0
+                },
+                {
+                    "bbox": {
+                        "height": 200,
+                        "width": 200,
+                        "x": 100,
+                        "y": 100
+                    },
+                    "confidence": 0.800000011920929,
+                    "object_type_id": 0,
+                    "object_type_name": "person",
+                    "track_id": 0
+                },
+                {
+                    "bbox": {
+                        "height": 200,
+                        "width": 200,
+                        "x": 100,
+                        "y": 100
+                    },
+                    "confidence": 0.800000011920929,
+                    "object_type_id": 0,
+                    "object_type_name": "person",
+                    "track_id": 0
+                },
+                {
+                    "bbox": {
+                        "height": 200,
+                        "width": 200,
+                        "x": 100,
+                        "y": 100
+                    },
+                    "confidence": 0.800000011920929,
+                    "object_type_id": 0,
+                    "object_type_name": "person",
+                    "track_id": 0
+                },
+                {
+                    "bbox": {
+                        "height": 200,
+                        "width": 200,
+                        "x": 100,
+                        "y": 100
+                    },
+                    "confidence": 0.800000011920929,
+                    "object_type_id": 0,
+                    "object_type_name": "person",
+                    "track_id": 0
+                }
+            ],
+            "source_id": ""
+        }
+    ],
+    "type_message": 6
+}

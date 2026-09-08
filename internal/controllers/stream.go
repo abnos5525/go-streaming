@@ -101,7 +101,11 @@ func registerStream(r *gin.Engine) {
 			return
 		}
 		if err := stream.PutAI(id, b); err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"message": err.Error()})
+			code := http.StatusBadRequest
+			if err.Error() == "unknown stream" {
+				code = http.StatusNotFound
+			}
+			c.JSON(code, gin.H{"message": err.Error()})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"message": "ok"})

@@ -2,6 +2,7 @@ package stream
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -33,6 +34,9 @@ type session struct {
 	running       bool
 	tracks        []Track
 	pts           map[int]struct{}
+	nals          map[int]int
+	sei, pkts     int
+	peek          string
 	frame         *AIFrame
 }
 
@@ -76,6 +80,13 @@ type AIFrame struct {
 	TypeMessage int        `json:"type_message,omitempty"`
 }
 
+type AIDebug struct {
+	Packets int            `json:"packets"`
+	SEI     int            `json:"sei"`
+	NALs    map[string]int `json:"nals,omitempty"`
+	Peek    string         `json:"peek,omitempty"`
+}
+
 type Meta struct {
 	URL      string   `json:"url"`
 	RTSP     string   `json:"rtsp"`
@@ -85,6 +96,7 @@ type Meta struct {
 	Tracks   []Track  `json:"tracks,omitempty"`
 	Payloads []int    `json:"payloads,omitempty"`
 	AI       *AIFrame `json:"ai,omitempty"`
+	Debug    *AIDebug `json:"debug,omitempty"`
 }
 
 var (
@@ -122,17 +134,20 @@ func (s *session) meta() Meta {
 		pts = append(pts, p)
 	}
 	sort.Ints(pts)
-	return Meta{URL: s.playlist(), RTSP: s.url, Started: s.running, Ready: err == nil, Error: s.last, Tracks: s.tracks, Payloads: pts, AI: s.frame}
+	dbg := &AIDebug{Packets: s.pkts, SEI: s.sei, Peek: s.peek}
+	if len(s.nals) > 0 {
+		dbg.NALs = make(map[string]int, len(s.nals))
+		for k, v := range s.nals {
+			dbg.NALs[strconv.Itoa(k)] = v
+		}
+	}
+	return Meta{URL: s.playlist(), RTSP: s.url, Started: s.running, Ready: err == nil, Error: s.last, Tracks: s.tracks, Payloads: pts, AI: s.frame, Debug: dbg}
 }
 
 func PutAI(id string, body []byte) error {
-	f := parseAI(body)
-	if f == nil {
-		var buf []byte
-		f = feedJSON(&buf, body)
-	}
-	if f == nil {
-		return fmt.Errorf("invalid ai json")
+	f, err := parseAIErr(body)
+	if err != nil {
+		return err
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -284,12 +299,46 @@ func wrapAI(raw []byte) []byte {
 }
 
 func parseAI(raw []byte) *AIFrame {
-	raw = wrapAI(raw)
-	var f AIFrame
-	if json.Unmarshal(raw, &f) != nil || len(f.Results) == 0 {
+	f, _ := parseAIErr(raw)
+	return f
+}
+
+func parseAIErr(raw []byte) (*AIFrame, error) {
+	raw = bytes.TrimPrefix(bytes.TrimSpace(raw), []byte{0xef, 0xbb, 0xbf})
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("empty body — use --data-binary @result.json from the folder that has the file")
+	}
+	try := func(b []byte) *AIFrame {
+		var f AIFrame
+		if json.Unmarshal(b, &f) == nil && len(f.Results) > 0 {
+			return &f
+		}
+		var arr []AIFrame
+		if json.Unmarshal(b, &arr) == nil {
+			for i := range arr {
+				if len(arr[i].Results) > 0 {
+					return &arr[i]
+				}
+			}
+		}
 		return nil
 	}
-	return &f
+	if f := try(raw); f != nil {
+		return f, nil
+	}
+	if f := try(wrapAI(raw)); f != nil {
+		return f, nil
+	}
+	var dummy any
+	err := json.Unmarshal(raw, &dummy)
+	snip := string(raw)
+	if len(snip) > 80 {
+		snip = snip[:80]
+	}
+	if err != nil {
+		return nil, fmt.Errorf("invalid ai json: %v (got %q)", err, snip)
+	}
+	return nil, fmt.Errorf("invalid ai json: no results (got %q)", snip)
 }
 
 func looksLikeAI(b []byte) bool {
@@ -376,8 +425,14 @@ func seiAI(rbsp []byte) *AIFrame {
 		if f := scanAI(p); f != nil {
 			return f
 		}
+		if f := scanAI(gunzip(p)); f != nil {
+			return f
+		}
 		if pt == 5 && len(p) > 16 {
 			if f := scanAI(p[16:]); f != nil {
+				return f
+			}
+			if f := scanAI(gunzip(p[16:])); f != nil {
 				return f
 			}
 		}
@@ -435,8 +490,27 @@ func splitAnnexB(b []byte) [][]byte {
 	return out
 }
 
+func gunzip(b []byte) []byte {
+	if len(b) < 2 || b[0] != 0x1f || b[1] != 0x8b {
+		return nil
+	}
+	r, err := gzip.NewReader(bytes.NewReader(b))
+	if err != nil {
+		return nil
+	}
+	defer r.Close()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
 func extractAI(b []byte) *AIFrame {
 	if f := scanAI(b); f != nil {
+		return f
+	}
+	if f := scanAI(unescapeRBSP(b)); f != nil {
 		return f
 	}
 	for _, nal := range splitAnnexB(b) {
@@ -472,6 +546,9 @@ func h264NALs(payload []byte, fu *[]byte) [][]byte {
 		}
 		hdr := payload[1]
 		orig := hdr & 0x1f
+		if orig != 6 {
+			return nil
+		}
 		if hdr&0x80 != 0 {
 			*fu = append([]byte{payload[0]&0xe0 | orig}, payload[2:]...)
 		} else if len(*fu) > 0 {
@@ -565,7 +642,8 @@ func ffmpegCmd(in, out string) *exec.Cmd {
 	}
 	args = append(args,
 		"-i", in,
-		"-an", "-c:v", "copy",
+		"-an",
+		"-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-pix_fmt", "yuv420p",
 		"-f", "hls",
 		"-hls_time", "2",
 		"-hls_list_size", "4",
@@ -732,6 +810,27 @@ func (s *session) note(pt int) {
 	mu.Unlock()
 }
 
+func (s *session) noteRTP(payload []byte) {
+	mu.Lock()
+	s.pkts++
+	if s.nals == nil {
+		s.nals = map[int]int{}
+	}
+	if len(payload) > 0 {
+		t := int(payload[0] & 0x1f)
+		s.nals[t]++
+		if t == 6 || t == 28 && len(payload) > 1 && payload[1]&0x1f == 6 {
+			s.sei++
+			n := 48
+			if n > len(payload) {
+				n = len(payload)
+			}
+			s.peek = hex.EncodeToString(payload[:n])
+		}
+	}
+	mu.Unlock()
+}
+
 func (s *session) setFrame(f *AIFrame) {
 	mu.Lock()
 	s.frame = f
@@ -775,6 +874,7 @@ func (s *session) sniff(my int, mc *net.UDPConn, relay int) {
 			continue
 		}
 		s.note(pt)
+		s.noteRTP(payload)
 		if f := extractAI(payload); f != nil {
 			s.setFrame(f)
 		} else {
