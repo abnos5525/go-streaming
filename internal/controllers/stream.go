@@ -14,8 +14,20 @@ func playPage(id string) string {
 	src := "/hls/" + id + "/index.m3u8"
 	return `<!doctype html>
 <meta charset="utf-8">
-<style>body{margin:0;background:#000}video{width:100%;display:block}</style>
+<style>
+body{margin:0;background:#111;color:#eee;font:13px sans-serif}
+video{width:100%;display:block;background:#000}
+#bar{padding:8px}
+button{padding:6px 12px}
+#out{white-space:pre-wrap}
+img{max-width:100%;margin-top:8px}
+</style>
 <video id="v" autoplay playsinline muted controls></video>
+<div id="bar">
+<button id="chk">check AI overlay</button>
+<pre id="out"></pre>
+<img id="snap" hidden>
+</div>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
 <script>
 const v = document.getElementById('v');
@@ -27,6 +39,16 @@ if (window.Hls && Hls.isSupported()) {
 } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
   v.src = src;
 }
+document.getElementById('chk').onclick = () => {
+  const out = document.getElementById('out');
+  const im = document.getElementById('snap');
+  out.textContent = 'checking…';
+  im.hidden = true;
+  fetch('/stream/check/` + id + `').then(r => r.json()).then(j => {
+    out.textContent = JSON.stringify(j, null, 2);
+    if (j.snap) { im.src = j.snap + '?' + Date.now(); im.hidden = false; }
+  }).catch(e => { out.textContent = String(e); });
+};
 </script>`
 }
 

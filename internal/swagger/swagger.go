@@ -30,6 +30,18 @@ type streamMsg struct {
 	Message string `json:"message"`
 }
 
+type streamID struct {
+	ID string `path:"id"`
+}
+
+type overlayCheck struct {
+	BurnedIn bool   `json:"burned_in"`
+	Runs     int    `json:"neon_runs"`
+	Boxes    int    `json:"ai_boxes"`
+	Snap     string `json:"snap"`
+	Look     string `json:"look"`
+}
+
 type streamTrack struct {
 	Type    string `json:"type"`
 	Codec   string `json:"codec"`
@@ -110,6 +122,16 @@ func spec() []byte {
 	sp.AddReqStructure(new(streamStart))
 	sp.AddRespStructure(new(streamMsg), func(cu *openapi.ContentUnit) { cu.HTTPStatus = http.StatusOK })
 	if err := r.AddOperation(sp); err != nil {
+		panic(err)
+	}
+	ck, err := r.NewOperationContext(http.MethodGet, "/stream/check/{id}")
+	if err != nil {
+		panic(err)
+	}
+	ck.SetSummary("Check if AI boxes are painted into the video")
+	ck.AddReqStructure(new(streamID))
+	ck.AddRespStructure(new(overlayCheck), func(cu *openapi.ContentUnit) { cu.HTTPStatus = http.StatusOK })
+	if err := r.AddOperation(ck); err != nil {
 		panic(err)
 	}
 	b, err := json.Marshal(r.Spec)
