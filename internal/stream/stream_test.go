@@ -35,6 +35,20 @@ func TestFFmpegInputMulticast(t *testing.T) {
 	if !strings.Contains(got, "reuse=1") {
 		t.Fatal(got)
 	}
+	if strings.Contains(got, "timeout=") {
+		t.Fatal(got)
+	}
+}
+
+func TestRtpSDP(t *testing.T) {
+	u := multicastURL("udp://224.2.0.1:5484")
+	if u == nil {
+		t.Fatal("nil")
+	}
+	s := rtpSDP(u)
+	if !strings.Contains(s, "224.2.0.1") || !strings.Contains(s, "5484") || !strings.Contains(s, "H264/90000") {
+		t.Fatal(s)
+	}
 }
 
 func TestTracksFromProbe(t *testing.T) {

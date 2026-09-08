@@ -144,11 +144,12 @@ func lanIPv4() string {
 			}
 		}
 	}
-	if lan10 != "" {
-		return lan10
-	}
+	// cameras are on 192.168; 10.x is often VPN and never sees 224.2.0.1
 	if lan192 != "" {
 		return lan192
+	}
+	if lan10 != "" {
+		return lan10
 	}
 	return fallback
 }
@@ -172,11 +173,27 @@ func ffmpegInput(raw string) string {
 		}
 	}
 	q.Set("reuse", "1")
-	if q.Get("timeout") == "" {
-		q.Set("timeout", "5000000")
-	}
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+func multicastURL(raw string) *url.URL {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil
+	}
+	if u.Scheme != "udp" && u.Scheme != "rtp" {
+		return nil
+	}
+	ip := net.ParseIP(u.Hostname())
+	if ip == nil || !ip.IsMulticast() {
+		return nil
+	}
+	return u
+}
+
+func rtpSDP(u *url.URL) string {
+	return fmt.Sprintf("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=stream\nc=IN IP4 %s\nt=0 0\nm=video %s RTP/AVP 96\na=rtpmap:96 H264/90000\n", u.Hostname(), u.Port())
 }
 
 func ffmpegCmd(in, out string) *exec.Cmd {
@@ -256,13 +273,23 @@ func (s *session) loop(my int) {
 		return
 	}
 	in := ffmpegInput(s.url)
+	if u := multicastURL(s.url); u != nil {
+		p := filepath.Join(dir, s.id, "in.sdp")
+		if err := os.WriteFile(p, []byte(rtpSDP(u)), 0o644); err != nil {
+			s.set(err.Error())
+			log.Printf("hls %s sdp: %v", s.id, err)
+		} else {
+			in = p
+		}
+	} else {
+		go func() {
+			tr := probe(s.url)
+			mu.Lock()
+			s.tracks = tr
+			mu.Unlock()
+		}()
+	}
 	log.Printf("hls %s input %s", s.id, in)
-	go func() {
-		tr := probe(s.url)
-		mu.Lock()
-		s.tracks = tr
-		mu.Unlock()
-	}()
 	out := filepath.Join(dir, s.id, "index.m3u8")
 	for {
 		if !s.alive(my) {
