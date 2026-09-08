@@ -14,13 +14,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	DefaultURL = "rtsp://192.168.1.46:554/stream1"
+	DefaultURL = "udp://224.2.0.1:5484"
 	dir     = "hls"
 )
 
@@ -30,6 +32,8 @@ type session struct {
 	gen           int
 	running       bool
 	tracks        []Track
+	pts           map[int]struct{}
+	ai            string
 }
 
 type Track struct {
@@ -46,8 +50,10 @@ type Meta struct {
 	RTSP    string  `json:"rtsp"`
 	Started bool    `json:"started"`
 	Ready   bool    `json:"ready"`
-	Error   string  `json:"error,omitempty"`
-	Tracks  []Track `json:"tracks,omitempty"`
+	Error    string  `json:"error,omitempty"`
+	Tracks   []Track `json:"tracks,omitempty"`
+	Payloads []int   `json:"payloads,omitempty"`
+	AI       string  `json:"ai,omitempty"`
 }
 
 var (
@@ -79,7 +85,12 @@ func (s *session) playlist() string { return "/hls/" + s.id + "/index.m3u8" }
 
 func (s *session) meta() Meta {
 	_, err := os.Stat(filepath.Join(dir, s.id, "index.m3u8"))
-	return Meta{URL: s.playlist(), RTSP: s.url, Started: s.running, Ready: err == nil, Error: s.last, Tracks: s.tracks}
+	var pts []int
+	for p := range s.pts {
+		pts = append(pts, p)
+	}
+	sort.Ints(pts)
+	return Meta{URL: s.playlist(), RTSP: s.url, Started: s.running, Ready: err == nil, Error: s.last, Tracks: s.tracks, Payloads: pts, AI: s.ai}
 }
 
 func ByID(id string) (Meta, bool) {
@@ -196,6 +207,148 @@ func rtpSDP(u *url.URL) string {
 	return fmt.Sprintf("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=stream\nc=IN IP4 %s\nt=0 0\nm=video %s RTP/AVP 96\na=rtpmap:96 H264/90000\n", u.Hostname(), u.Port())
 }
 
+func relayPort(id string) int {
+	v, _ := strconv.ParseUint(id[:4], 16, 16)
+	return 30000 + int(v%20000)
+}
+
+func ifaceByIP(ip string) *net.Interface {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	for _, ifi := range ifaces {
+		addrs, _ := ifi.Addrs()
+		for _, a := range addrs {
+			n, ok := a.(*net.IPNet)
+			if ok && n.IP.To4() != nil && n.IP.String() == ip {
+				return &ifi
+			}
+		}
+	}
+	return nil
+}
+
+func joinMulticast(u *url.URL) (*net.UDPConn, error) {
+	addr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(u.Hostname(), u.Port()))
+	if err != nil {
+		return nil, err
+	}
+	var ifi *net.Interface
+	if lan := lanIPv4(); lan != "" {
+		ifi = ifaceByIP(lan)
+	}
+	c, err := net.ListenMulticastUDP("udp4", ifi, addr)
+	if err != nil {
+		return nil, err
+	}
+	_ = c.SetReadBuffer(4 << 20)
+	return c, nil
+}
+
+func rtpPacket(b []byte) (pt int, payload []byte, ok bool) {
+	if len(b) < 12 || b[0]>>6 != 2 {
+		return 0, nil, false
+	}
+	off := 12 + 4*int(b[0]&0x0f)
+	if b[0]&0x10 != 0 {
+		if len(b) < off+4 {
+			return 0, nil, false
+		}
+		off += 4 + 4*((int(b[off+2])<<8)|int(b[off+3]))
+	}
+	if off > len(b) {
+		return 0, nil, false
+	}
+	payload = b[off:]
+	if b[0]&0x20 != 0 && len(payload) > 0 {
+		pad := int(payload[len(payload)-1])
+		if pad <= len(payload) {
+			payload = payload[:len(payload)-pad]
+		}
+	}
+	return int(b[1] & 0x7f), payload, true
+}
+
+func clipAI(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > 2000 {
+		s = s[:2000]
+	}
+	return s
+}
+
+func printableAI(b []byte) string {
+	start := -1
+	for i, c := range b {
+		if c == '{' || c == '<' {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return ""
+	}
+	return clipAI(string(b[start:]))
+}
+
+func payloadAI(pt int, b []byte) string {
+	if t := printableAI(b); t != "" {
+		return t
+	}
+	n := len(b)
+	if n > 24 {
+		n = 24
+	}
+	return fmt.Sprintf("pt %d (%d bytes) %x", pt, len(b), b[:n])
+}
+
+func h264AI(payload []byte, fu *[]byte) string {
+	if len(payload) < 1 {
+		return ""
+	}
+	nal := payload[0] & 0x1f
+	switch nal {
+	case 6:
+		return printableAI(payload)
+	case 24:
+		off := 1
+		for off+2 <= len(payload) {
+			n := int(payload[off])<<8 | int(payload[off+1])
+			off += 2
+			if n <= 0 || off+n > len(payload) {
+				break
+			}
+			unit := payload[off : off+n]
+			off += n
+			if len(unit) > 0 && unit[0]&0x1f == 6 {
+				if t := printableAI(unit); t != "" {
+					return t
+				}
+			}
+		}
+	case 28:
+		if len(payload) < 2 {
+			return ""
+		}
+		hdr := payload[1]
+		if hdr&0x1f != 6 {
+			return ""
+		}
+		if hdr&0x80 != 0 {
+			*fu = append([]byte{payload[0]&0xe0 | 6}, payload[2:]...)
+		} else if len(*fu) > 0 {
+			*fu = append(*fu, payload[2:]...)
+		}
+		if hdr&0x40 != 0 && len(*fu) > 0 {
+			t := printableAI(*fu)
+			*fu = nil
+			return t
+		}
+	}
+	return ""
+}
+
 func ffmpegCmd(in, out string) *exec.Cmd {
 	args := []string{"-hide_banner", "-loglevel", "error"}
 	low := strings.ToLower(in)
@@ -275,11 +428,21 @@ func (s *session) loop(my int) {
 	in := ffmpegInput(s.url)
 	if u := multicastURL(s.url); u != nil {
 		p := filepath.Join(dir, s.id, "in.sdp")
-		if err := os.WriteFile(p, []byte(rtpSDP(u)), 0o644); err != nil {
+		if mc, err := joinMulticast(u); err != nil {
 			s.set(err.Error())
-			log.Printf("hls %s sdp: %v", s.id, err)
-		} else {
+			log.Printf("hls %s multicast listen: %v", s.id, err)
+			_ = os.WriteFile(p, []byte(rtpSDP(u)), 0o644)
 			in = p
+		} else {
+			rp := relayPort(s.id)
+			ru, _ := url.Parse(fmt.Sprintf("rtp://127.0.0.1:%d", rp))
+			if err := os.WriteFile(p, []byte(rtpSDP(ru)), 0o644); err != nil {
+				mc.Close()
+				s.set(err.Error())
+			} else {
+				in = p
+				go s.sniff(my, mc, rp)
+			}
 		}
 	}
 	log.Printf("hls %s input %s", s.id, in)
@@ -351,6 +514,63 @@ func (s *session) stopIf(my int) {
 func wipe(id string) {
 	_ = os.RemoveAll(filepath.Join(dir, id))
 	_ = os.MkdirAll(filepath.Join(dir, id), 0o755)
+}
+
+func (s *session) note(pt int, ai string) {
+	mu.Lock()
+	if s.pts == nil {
+		s.pts = map[int]struct{}{}
+	}
+	s.pts[pt] = struct{}{}
+	if ai != "" {
+		if s.ai == "" || strings.HasPrefix(ai, "{") || strings.HasPrefix(ai, "<") {
+			s.ai = ai
+		}
+	}
+	mu.Unlock()
+}
+
+func (s *session) sniff(my int, mc *net.UDPConn, relay int) {
+	defer mc.Close()
+	dst, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("127.0.0.1:%d", relay))
+	if err != nil {
+		return
+	}
+	out, err := net.DialUDP("udp4", nil, dst)
+	if err != nil {
+		log.Printf("hls %s relay: %v", s.id, err)
+		return
+	}
+	defer out.Close()
+	buf := make([]byte, 2048)
+	var fu []byte
+	for {
+		if !s.alive(my) {
+			return
+		}
+		_ = mc.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, err := mc.Read(buf)
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				continue
+			}
+			return
+		}
+		pkt := buf[:n]
+		pt, payload, ok := rtpPacket(pkt)
+		if !ok {
+			continue
+		}
+		s.note(pt, "")
+		if pt == 96 {
+			if t := h264AI(payload, &fu); t != "" {
+				s.note(pt, t)
+			}
+			_, _ = out.Write(pkt)
+			continue
+		}
+		s.note(pt, payloadAI(pt, payload))
+	}
 }
 
 func (s *session) probeWhenReady(my int, playlist string) {

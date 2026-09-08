@@ -19,7 +19,7 @@ type helloResponse struct {
 }
 
 type streamStart struct {
-	URL string `json:"url" default:"rtsp://192.168.1.46:554/stream1" example:"rtsp://192.168.1.46:554/stream1"`
+	URL string `json:"url" default:"udp://224.2.0.1:5484" example:"udp://224.2.0.1:5484"`
 }
 
 type streamURL struct {
@@ -44,8 +44,10 @@ type streamMeta struct {
 	RTSP    string        `json:"rtsp"`
 	Started bool          `json:"started"`
 	Ready   bool          `json:"ready"`
-	Error   string        `json:"error,omitempty"`
-	Tracks  []streamTrack `json:"tracks,omitempty"`
+	Error    string        `json:"error,omitempty"`
+	Tracks   []streamTrack `json:"tracks,omitempty"`
+	Payloads []int         `json:"payloads,omitempty"`
+	AI       string        `json:"ai,omitempty"`
 }
 
 func spec() []byte {

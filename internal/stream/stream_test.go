@@ -6,7 +6,7 @@ import (
 )
 
 func TestStopNotRunning(t *testing.T) {
-	if err := Stop("rtsp://192.168.1.46:554/stream1"); err == nil {
+	if err := Stop("udp://224.2.0.1:5484"); err == nil {
 		t.Fatal("want error")
 	}
 	if err := Stop("http://x"); err == nil {
@@ -48,6 +48,24 @@ func TestRtpSDP(t *testing.T) {
 	s := rtpSDP(u)
 	if !strings.Contains(s, "224.2.0.1") || !strings.Contains(s, "5484") || !strings.Contains(s, "H264/90000") {
 		t.Fatal(s)
+	}
+}
+
+func TestRtpPacketAndAI(t *testing.T) {
+	pkt := make([]byte, 12+8)
+	pkt[0] = 0x80
+	pkt[1] = 96
+	copy(pkt[12:], []byte{6, '{', '"', 'a', '"', ':', '1', '}'})
+	pt, payload, ok := rtpPacket(pkt)
+	if !ok || pt != 96 || printableAI(payload) != `{"a":1}` {
+		t.Fatalf("pt=%d ok=%v %q", pt, ok, printableAI(payload))
+	}
+	var fu []byte
+	if got := h264AI(payload, &fu); got != `{"a":1}` {
+		t.Fatal(got)
+	}
+	if p := relayPort("e903d3fad593f281"); p < 30000 || p >= 50000 {
+		t.Fatal(p)
 	}
 }
 

@@ -15,7 +15,7 @@ func playPage(id string) string {
 <meta charset="utf-8">
 <style>
 body{margin:0;background:#111;color:#eee;font:13px sans-serif}
-#meta{position:absolute;top:8px;left:8px;z-index:1;background:#000c;padding:8px 10px;max-width:42%}
+#meta{position:absolute;top:8px;left:8px;z-index:1;background:#000c;padding:8px 10px;max-width:48%;max-height:40%;overflow:auto;white-space:pre-wrap}
 video{width:100%;background:#000;display:block}
 </style>
 <pre id="meta">metadata…</pre>
@@ -38,6 +38,8 @@ function line(t){
 function poll(){
   fetch('/stream/meta/` + id + `').then(r=>r.json()).then(m=>{
     const rows = (m.tracks||[]).map(line);
+    if (m.payloads && m.payloads.length) rows.push('rtp pt '+m.payloads.join(','));
+    if (m.ai) rows.push(m.ai);
     document.getElementById('meta').textContent = rows.join('\n') || 'no stream tracks yet';
   }).catch(()=>{});
 }
