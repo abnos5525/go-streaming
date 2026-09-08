@@ -166,4 +166,14 @@ func TestOverlayVerdict(t *testing.T) {
 	if hevcNAL(h264p) != 0 {
 		t.Fatal("h264 p-slice counted as hevc vps")
 	}
+	img := image.NewRGBA(image.Rect(0, 0, 80, 80))
+	for y := 0; y < 80; y++ {
+		for x := 0; x < 80; x++ {
+			img.Set(x, y, color.RGBA{80, 80, 80, 255})
+		}
+	}
+	o := []AIObject{{BBox: BBox{X: 10, Y: 10, Width: 40, Height: 30}}}
+	if boxEdge(img, o) >= 0.35 {
+		t.Fatal("plain")
+	}
 }

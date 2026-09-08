@@ -47,6 +47,7 @@ type overlayCheck struct {
 	AIBoxes  int            `json:"ai_boxes"`
 	Source   any            `json:"source"`
 	HLS      any            `json:"hls"`
+	Other    any            `json:"other"`
 	Verdict  string         `json:"verdict"`
 }
 

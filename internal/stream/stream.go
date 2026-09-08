@@ -32,17 +32,17 @@ const (
 )
 
 type session struct {
-	url, id, last string
-	proc          *os.Process
-	gen           int
-	running       bool
-	tracks        []Track
-	rtpTS         atomic.Uint32
-	frame         *AIFrame
-	pts           map[int]struct{}
-	nals          map[int]int
-	hevc          map[int]int
-	pkts          int
+	url, id, last  string
+	proc           *os.Process
+	gen            int
+	running        bool
+	tracks         []Track
+	rtpTS          atomic.Uint32
+	frame          *AIFrame
+	pts            map[int]struct{}
+	nals           map[int]int
+	hevc           map[int]int
+	pkts, ext, raw int
 }
 
 type Track struct {
@@ -720,10 +720,18 @@ func (s *session) sniff(my int, mc *net.UDPConn, relay int) {
 		pkt := buf[:n]
 		pt, ts, payload, ok := rtpPacket(pkt)
 		if !ok {
+			mu.Lock()
+			s.raw++
+			mu.Unlock()
 			if f := parseAI(pkt); f != nil {
 				s.setFrame(f)
 			}
 			continue
+		}
+		if pkt[0]&0x10 != 0 {
+			mu.Lock()
+			s.ext++
+			mu.Unlock()
 		}
 		s.rtpTS.Store(ts)
 		s.notePkt(pt, nalType(payload), hevcNAL(payload))
@@ -885,9 +893,10 @@ func hevcAI(p []byte) *AIFrame {
 }
 
 type FrameSnap struct {
-	Snap string `json:"snap,omitempty"`
-	Neon int    `json:"neon_runs"`
-	Err  string `json:"error,omitempty"`
+	Snap string  `json:"snap,omitempty"`
+	Neon int     `json:"neon_runs"`
+	Edge float64 `json:"bbox_edge,omitempty"`
+	Err  string  `json:"error,omitempty"`
 }
 
 type OverlayCheck struct {
@@ -903,7 +912,15 @@ type OverlayCheck struct {
 	AIBoxes  int            `json:"ai_boxes"`
 	Source   FrameSnap      `json:"source"`
 	HLS      FrameSnap      `json:"hls"`
+	Other    Other          `json:"other"`
 	Verdict  string         `json:"verdict"`
+}
+
+type Other struct {
+	RTPExt  int      `json:"rtp_ext"`
+	NonRTP  int      `json:"non_rtp"`
+	Streams []string `json:"streams,omitempty"`
+	TS      []string `json:"ts_hints,omitempty"`
 }
 
 func CheckOverlay(id string) (OverlayCheck, error) {
@@ -922,11 +939,13 @@ func CheckOverlay(id string) (OverlayCheck, error) {
 		mu.Unlock()
 		return OverlayCheck{}, fmt.Errorf("unknown stream")
 	}
-	pkts := s.pkts
+	pkts, ext, raw := s.pkts, s.ext, s.raw
 	var nbox int
+	var objs []AIObject
 	if s.frame != nil {
 		for _, r := range s.frame.Results {
 			nbox += len(r.Objects)
+			objs = append(objs, r.Objects...)
 		}
 	}
 	nals := map[string]int{}
@@ -949,8 +968,9 @@ func CheckOverlay(id string) (OverlayCheck, error) {
 	out.Codec, out.PixFmt = probeVideo(filepath.Join(dir, id, "index.m3u8"))
 	out.H264 = out.Codec == "h264" || nals["1"] > 0 || nals["7"] > 0
 	out.HEVC = out.Codec == "hevc" || (hevc["33"] > 0 && (hevc["32"] > 0 || hevc["34"] > 0))
-	out.HLS = grabSnap(filepath.Join(dir, id, "index.m3u8"), hlsPath, "/hls/"+id+"/snap.jpg")
+	out.HLS = grabSnap(filepath.Join(dir, id, "index.m3u8"), hlsPath, "/hls/"+id+"/snap.jpg", objs)
 	out.Source = FrameSnap{Err: "skipped: we already own the multicast; ffmpeg copy so HLS pixels = camera"}
+	out.Other = Other{RTPExt: ext, NonRTP: raw, Streams: probeAll(filepath.Join(dir, id, "index.m3u8")), TS: tsHints(id)}
 	out.Verdict = overlayVerdict(out)
 	return out, nil
 }
@@ -968,6 +988,15 @@ func overlayVerdict(o OverlayCheck) string {
 	if o.HLS.Neon > 0 {
 		return "boxes painted into the video pixels"
 	}
+	if o.HLS.Edge >= 0.35 {
+		return "possible painted boxes (any color) at JSON bbox edges — look at snap.jpg"
+	}
+	if len(o.Other.TS) > 0 {
+		return "extra in MPEG-TS: " + strings.Join(o.Other.TS, ",") + " — not pixel overlay"
+	}
+	if o.Other.RTPExt > 0 {
+		return "RTP header extensions present (metadata, not pixels). HLS snap has no overlay"
+	}
 	hevc := "no H265 on this UDP (no HEVC VPS/SPS/PPS)"
 	if o.HEVC {
 		hevc = "H265 IS on this UDP, but HLS snap still has no overlay"
@@ -978,7 +1007,7 @@ func overlayVerdict(o OverlayCheck) string {
 	return "H264 copy, SEI present, HLS snap has no overlay. JSON is data not pixels. " + hevc
 }
 
-func grabSnap(in, file, url string) FrameSnap {
+func grabSnap(in, file, url string, objs []AIObject) FrameSnap {
 	if err := grabJPEG(in, file); err != nil {
 		return FrameSnap{Err: err.Error()}
 	}
@@ -991,7 +1020,7 @@ func grabSnap(in, file, url string) FrameSnap {
 	if err != nil {
 		return FrameSnap{Snap: url, Err: err.Error()}
 	}
-	return FrameSnap{Snap: url, Neon: neonRuns(img)}
+	return FrameSnap{Snap: url, Neon: neonRuns(img), Edge: boxEdge(img, objs)}
 }
 
 func grabJPEG(in, out string) error {
@@ -1028,6 +1057,112 @@ func probeVideo(playlist string) (codec, pix string) {
 		return "", ""
 	}
 	return p.Streams[0].CodecName, p.Streams[0].PixFmt
+}
+
+func probeAll(playlist string) []string {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	b, err := exec.CommandContext(ctx, "ffprobe", "-v", "error",
+		"-protocol_whitelist", "file,crypto,data", "-allowed_extensions", "ALL",
+		"-show_entries", "stream=codec_type,codec_name",
+		"-of", "json", "-i", playlist).Output()
+	if err != nil {
+		return nil
+	}
+	var p struct {
+		Streams []struct {
+			CodecType string `json:"codec_type"`
+			CodecName string `json:"codec_name"`
+		} `json:"streams"`
+	}
+	if json.Unmarshal(b, &p) != nil {
+		return nil
+	}
+	out := make([]string, 0, len(p.Streams))
+	for _, s := range p.Streams {
+		out = append(out, s.CodecType+"/"+s.CodecName)
+	}
+	return out
+}
+
+func tsHints(id string) []string {
+	files, _ := filepath.Glob(filepath.Join(dir, id, "*.ts"))
+	var latest string
+	var mt time.Time
+	for _, p := range files {
+		fi, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		if fi.ModTime().After(mt) {
+			mt, latest = fi.ModTime(), p
+		}
+	}
+	if latest == "" {
+		return nil
+	}
+	b, err := os.ReadFile(latest)
+	if err != nil {
+		return nil
+	}
+	var h []string
+	if bytes.Contains(b, []byte("ID3")) {
+		h = append(h, "id3")
+	}
+	if bytes.Contains(b, []byte("KLVA")) || bytes.Contains(b, []byte("klv")) {
+		h = append(h, "klv")
+	}
+	if bytes.Contains(bytes.ToUpper(b), []byte("WEBVTT")) {
+		h = append(h, "webvtt")
+	}
+	if bytes.Contains(b, []byte("GA94")) {
+		h = append(h, "cea608")
+	}
+	if bytes.Contains(b, []byte{0, 0, 1, 6}) || bytes.Contains(b, []byte{0, 0, 0, 1, 6}) {
+		h = append(h, "sei_nal6")
+	}
+	return h
+}
+
+func boxEdge(img image.Image, objs []AIObject) float64 {
+	b := img.Bounds()
+	hit, tot := 0, 0
+	luma := func(x, y int) int {
+		if x < b.Min.X || y < b.Min.Y || x >= b.Max.X || y >= b.Max.Y {
+			return -1
+		}
+		r, g, bl, _ := img.At(x, y).RGBA()
+		return int(r>>8)*299 + int(g>>8)*587 + int(bl>>8)*114
+	}
+	check := func(x, y, ix, iy int) {
+		a, c := luma(x, y), luma(ix, iy)
+		if a < 0 || c < 0 {
+			return
+		}
+		tot++
+		if a-c > 40000 || c-a > 40000 {
+			hit++
+		}
+	}
+	for _, o := range objs {
+		x0, y0 := int(o.BBox.X), int(o.BBox.Y)
+		x1, y1 := x0+int(o.BBox.Width)-1, y0+int(o.BBox.Height)-1
+		if x1 <= x0 || y1 <= y0 {
+			continue
+		}
+		for x := x0; x <= x1; x++ {
+			check(x, y0, x, y0+3)
+			check(x, y1, x, y1-3)
+		}
+		for y := y0; y <= y1; y++ {
+			check(x0, y, x0+3, y)
+			check(x1, y, x1-3, y)
+		}
+	}
+	if tot == 0 {
+		return 0
+	}
+	return float64(hit) / float64(tot)
 }
 
 func paintLike(c color.Color) bool {
