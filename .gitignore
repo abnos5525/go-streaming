@@ -1,0 +1,5 @@
+.env
+hello.exe
+server.log
+server.err
+hls/
