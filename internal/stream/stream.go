@@ -858,31 +858,20 @@ func CheckOverlay(id string) (OverlayCheck, error) {
 		Runs:     runs,
 		Boxes:    nbox,
 		Snap:     "/hls/" + id + "/snap.jpg",
-		Look:     "open snap.jpg. boxes/text in the photo = AI painted the video. clean camera = JSON only",
+		Look: "snap.jpg is the answer. burned_in only counts neon green/red/yellow lines, not lights or TVs",
 	}, nil
 }
 
 func paintLike(c color.Color) bool {
 	r32, g32, b32, _ := c.RGBA()
-	r, g, b := uint8(r32>>8), uint8(g32>>8), uint8(b32>>8)
-	mx, mn := r, r
-	if g > mx {
-		mx = g
+	r, g, b := int(r32>>8), int(g32>>8), int(b32>>8)
+	if g >= 200 && g >= r+50 && g >= b+50 {
+		return true
 	}
-	if b > mx {
-		mx = b
+	if r >= 200 && r >= g+50 && r >= b+50 {
+		return true
 	}
-	if g < mn {
-		mn = g
-	}
-	if b < mn {
-		mn = b
-	}
-	if mx < 170 {
-		return false
-	}
-	sat := int(mx) - int(mn)
-	return sat >= 100 || mx >= 235
+	return r >= 200 && g >= 200 && b < 80
 }
 
 func neonRuns(img image.Image) int {

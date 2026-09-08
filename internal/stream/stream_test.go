@@ -125,11 +125,11 @@ func TestNeonRuns(t *testing.T) {
 	img := image.NewRGBA(image.Rect(0, 0, 80, 80))
 	for y := 0; y < 80; y++ {
 		for x := 0; x < 80; x++ {
-			img.Set(x, y, color.RGBA{70, 70, 70, 255})
+			img.Set(x, y, color.RGBA{220, 220, 210, 255})
 		}
 	}
 	if neonRuns(img) != 0 {
-		t.Fatal("plain")
+		t.Fatal("white wall")
 	}
 	for x := 10; x < 60; x++ {
 		img.Set(x, 20, color.RGBA{0, 255, 0, 255})
