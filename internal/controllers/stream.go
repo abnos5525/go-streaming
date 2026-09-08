@@ -52,6 +52,19 @@ func registerStream(r *gin.Engine) {
 		}
 		c.JSON(http.StatusOK, m)
 	})
+	r.GET("/stream/check/:id", func(c *gin.Context) {
+		id := c.Param("id")
+		out, err := stream.CheckOverlay(id)
+		if err != nil {
+			code := http.StatusBadRequest
+			if err.Error() == "unknown stream" {
+				code = http.StatusNotFound
+			}
+			c.JSON(code, gin.H{"message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, out)
+	})
 	r.POST("/stream/ai/:id", func(c *gin.Context) {
 		id := c.Param("id")
 		b, err := io.ReadAll(c.Request.Body)
@@ -119,6 +132,9 @@ func serveHLS(c *gin.Context) {
 	case ".ts":
 		c.Header("Content-Type", "video/mp2t")
 		c.Header("Cache-Control", "max-age=2")
+	case ".jpg":
+		c.Header("Content-Type", "image/jpeg")
+		c.Header("Cache-Control", "no-cache, no-store")
 	default:
 		c.Status(http.StatusNotFound)
 		return

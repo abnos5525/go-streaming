@@ -8,6 +8,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"io"
 	"log"
 	"net"
@@ -798,4 +801,120 @@ func (s *session) set(msg string) {
 	mu.Lock()
 	s.last = msg
 	mu.Unlock()
+}
+
+type OverlayCheck struct {
+	BurnedIn bool   `json:"burned_in"`
+	Runs     int    `json:"neon_runs"`
+	Boxes    int    `json:"ai_boxes"`
+	Snap     string `json:"snap"`
+	Look     string `json:"look"`
+}
+
+func CheckOverlay(id string) (OverlayCheck, error) {
+	if !ValidID(id) {
+		return OverlayCheck{}, fmt.Errorf("unknown stream")
+	}
+	mu.Lock()
+	var s *session
+	for _, x := range sessions {
+		if x.id == id {
+			s = x
+			break
+		}
+	}
+	var nbox int
+	if s != nil && s.frame != nil {
+		for _, r := range s.frame.Results {
+			nbox += len(r.Objects)
+		}
+	}
+	mu.Unlock()
+	if s == nil {
+		return OverlayCheck{}, fmt.Errorf("unknown stream")
+	}
+	playlist := filepath.Join(dir, id, "index.m3u8")
+	snap := filepath.Join(dir, id, "snap.jpg")
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-loglevel", "error",
+		"-y", "-protocol_whitelist", "file,crypto,data", "-allowed_extensions", "ALL",
+		"-i", playlist, "-frames:v", "1", snap)
+	if err := cmd.Run(); err != nil {
+		return OverlayCheck{}, fmt.Errorf("no frame yet: %v", err)
+	}
+	f, err := os.Open(snap)
+	if err != nil {
+		return OverlayCheck{}, err
+	}
+	defer f.Close()
+	img, err := jpeg.Decode(f)
+	if err != nil {
+		return OverlayCheck{}, err
+	}
+	runs := neonRuns(img)
+	return OverlayCheck{
+		BurnedIn: runs >= 12,
+		Runs:     runs,
+		Boxes:    nbox,
+		Snap:     "/hls/" + id + "/snap.jpg",
+		Look:     "open snap.jpg. boxes/text in the photo = AI painted the video. clean camera = JSON only",
+	}, nil
+}
+
+func paintLike(c color.Color) bool {
+	r32, g32, b32, _ := c.RGBA()
+	r, g, b := uint8(r32>>8), uint8(g32>>8), uint8(b32>>8)
+	mx, mn := r, r
+	if g > mx {
+		mx = g
+	}
+	if b > mx {
+		mx = b
+	}
+	if g < mn {
+		mn = g
+	}
+	if b < mn {
+		mn = b
+	}
+	if mx < 170 {
+		return false
+	}
+	sat := int(mx) - int(mn)
+	return sat >= 100 || mx >= 235
+}
+
+func neonRuns(img image.Image) int {
+	b := img.Bounds()
+	hits := 0
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		run := 0
+		for x := b.Min.X; x < b.Max.X; x++ {
+			if paintLike(img.At(x, y)) {
+				run++
+				if run == 20 {
+					hits++
+					break
+				}
+			} else {
+				run = 0
+			}
+		}
+	}
+	for x := b.Min.X; x < b.Max.X; x++ {
+		run := 0
+		for y := b.Min.Y; y < b.Max.Y; y++ {
+			if paintLike(img.At(x, y)) {
+				run++
+				if run == 20 {
+					hits++
+					break
+				}
+			} else {
+				run = 0
+			}
+		}
+	}
+	return hits
 }

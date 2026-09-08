@@ -1,6 +1,8 @@
 package stream
 
 import (
+	"image"
+	"image/color"
 	"strings"
 	"testing"
 )
@@ -116,5 +118,28 @@ func TestTracksFromProbe(t *testing.T) {
 	]}`))
 	if len(got) != 2 || got[0].Width != 1920 || got[0].Handler != "Video" || got[1].Type != "data" {
 		t.Fatal(got)
+	}
+}
+
+func TestNeonRuns(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 80, 80))
+	for y := 0; y < 80; y++ {
+		for x := 0; x < 80; x++ {
+			img.Set(x, y, color.RGBA{70, 70, 70, 255})
+		}
+	}
+	if neonRuns(img) != 0 {
+		t.Fatal("plain")
+	}
+	for x := 10; x < 60; x++ {
+		img.Set(x, 20, color.RGBA{0, 255, 0, 255})
+		img.Set(x, 50, color.RGBA{0, 255, 0, 255})
+	}
+	for y := 20; y <= 50; y++ {
+		img.Set(10, y, color.RGBA{0, 255, 0, 255})
+		img.Set(59, y, color.RGBA{0, 255, 0, 255})
+	}
+	if neonRuns(img) < 2 {
+		t.Fatal(neonRuns(img))
 	}
 }
