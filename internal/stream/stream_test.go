@@ -159,7 +159,11 @@ func TestOverlayVerdict(t *testing.T) {
 		t.Fatal(nalType(pkt))
 	}
 	sps := []byte{0x42, 0x01}
-	if hevcType(sps) != 33 {
-		t.Fatal(hevcType(sps))
+	if hevcType(sps) != 33 || hevcNAL(sps) != 33 {
+		t.Fatal(hevcNAL(sps))
+	}
+	h264p := []byte{0x41, 0x00, 0x00}
+	if hevcNAL(h264p) != 0 {
+		t.Fatal("h264 p-slice counted as hevc vps")
 	}
 }

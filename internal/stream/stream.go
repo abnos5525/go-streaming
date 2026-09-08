@@ -726,7 +726,7 @@ func (s *session) sniff(my int, mc *net.UDPConn, relay int) {
 			continue
 		}
 		s.rtpTS.Store(ts)
-		s.notePkt(pt, nalType(payload), hevcType(payload))
+		s.notePkt(pt, nalType(payload), hevcNAL(payload))
 		if f := parseAI(payload); f != nil {
 			s.setFrame(f)
 		}
@@ -845,6 +845,19 @@ func nalType(p []byte) int {
 	return t
 }
 
+func hevcNAL(p []byte) int {
+	switch nalType(p) {
+	case 1, 5, 6, 7, 8, 24, 28:
+		return 0
+	}
+	t := hevcType(p)
+	switch t {
+	case 32, 33, 34, 39, 40:
+		return t
+	}
+	return 0
+}
+
 func hevcType(p []byte) int {
 	if len(p) < 2 {
 		return 0
@@ -935,7 +948,7 @@ func CheckOverlay(id string) (OverlayCheck, error) {
 	out := OverlayCheck{FFmpeg: "copy", Packets: pkts, Payloads: pts, NALs: nals, HEVCNALs: hevc, AIBoxes: nbox}
 	out.Codec, out.PixFmt = probeVideo(filepath.Join(dir, id, "index.m3u8"))
 	out.H264 = out.Codec == "h264" || nals["1"] > 0 || nals["7"] > 0
-	out.HEVC = out.Codec == "hevc" || hevc["32"] > 0 || hevc["33"] > 0 || hevc["34"] > 0
+	out.HEVC = out.Codec == "hevc" || (hevc["33"] > 0 && (hevc["32"] > 0 || hevc["34"] > 0))
 	out.HLS = grabSnap(filepath.Join(dir, id, "index.m3u8"), hlsPath, "/hls/"+id+"/snap.jpg")
 	out.Source = FrameSnap{Err: "skipped: we already own the multicast; ffmpeg copy so HLS pixels = camera"}
 	out.Verdict = overlayVerdict(out)
