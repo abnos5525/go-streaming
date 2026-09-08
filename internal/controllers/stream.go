@@ -14,23 +14,8 @@ func playPage(id string) string {
 	src := "/hls/" + id + "/index.m3u8"
 	return `<!doctype html>
 <meta charset="utf-8">
-<style>
-body{margin:0;background:#111;color:#eee;font:13px sans-serif}
-video{width:100%;display:block;background:#000}
-#bar{padding:8px}
-button{padding:6px 12px}
-#out{white-space:pre-wrap}
-img{max-width:100%;margin-top:8px}
-</style>
+<style>body{margin:0;background:#000}video{width:100%;display:block}</style>
 <video id="v" autoplay playsinline muted controls></video>
-<div id="bar">
-<button id="chk">check source vs HLS</button>
-<pre id="out"></pre>
-<p>UDP source</p>
-<img id="src" hidden>
-<p>our HLS</p>
-<img id="hls" hidden>
-</div>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
 <script>
 const v = document.getElementById('v');
@@ -42,19 +27,6 @@ if (window.Hls && Hls.isSupported()) {
 } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
   v.src = src;
 }
-document.getElementById('chk').onclick = () => {
-  const out = document.getElementById('out');
-  document.getElementById('hls').hidden = true;
-  document.getElementById('src').hidden = true;
-  out.textContent = 'checking…';
-  fetch('/stream/check/` + id + `').then(r => r.json()).then(j => {
-    out.textContent = JSON.stringify(j, null, 2);
-    const hls = document.getElementById('hls');
-    const src = document.getElementById('src');
-    if (j.hls && j.hls.snap) { hls.src = j.hls.snap + '?' + Date.now(); hls.hidden = false; }
-    if (j.source && j.source.snap) { src.src = j.source.snap + '?' + Date.now(); src.hidden = false; }
-  }).catch(e => { out.textContent = String(e); });
-};
 </script>`
 }
 
@@ -79,19 +51,6 @@ func registerStream(r *gin.Engine) {
 			return
 		}
 		c.JSON(http.StatusOK, m)
-	})
-	r.GET("/stream/check/:id", func(c *gin.Context) {
-		id := c.Param("id")
-		out, err := stream.CheckOverlay(id)
-		if err != nil {
-			code := http.StatusBadRequest
-			if err.Error() == "unknown stream" {
-				code = http.StatusNotFound
-			}
-			c.JSON(code, gin.H{"message": err.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, out)
 	})
 	r.POST("/stream/ai/:id", func(c *gin.Context) {
 		id := c.Param("id")
@@ -160,9 +119,6 @@ func serveHLS(c *gin.Context) {
 	case ".ts":
 		c.Header("Content-Type", "video/mp2t")
 		c.Header("Cache-Control", "max-age=2")
-	case ".jpg":
-		c.Header("Content-Type", "image/jpeg")
-		c.Header("Cache-Control", "no-cache, no-store")
 	default:
 		c.Status(http.StatusNotFound)
 		return

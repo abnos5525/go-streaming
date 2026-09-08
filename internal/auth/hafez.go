@@ -1,4 +1,4 @@
-package utils
+package auth
 
 import (
 	"encoding/base64"
@@ -50,7 +50,10 @@ func hafezRoles(header string) []string {
 		return nil
 	}
 	defer res.Body.Close()
-	b, _ := io.ReadAll(res.Body)
+	b, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil
+	}
 	return extractRoles(b)
 }
 

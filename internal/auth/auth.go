@@ -1,4 +1,4 @@
-package guards
+package auth
 
 import (
 	"encoding/base64"
@@ -10,7 +10,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"project1/internal/config"
-	"project1/internal/utils"
 )
 
 func Allowed(authorization string) bool {
@@ -35,7 +34,7 @@ func Allowed(authorization string) bool {
 	if json.Unmarshal(b, &p) != nil || (p.Exp > 0 && float64(time.Now().Unix()) > p.Exp) {
 		return false
 	}
-	allowed, err := utils.AllowedRoles()
+	allowed, err := AllowedRoles()
 	if err != nil {
 		return false
 	}

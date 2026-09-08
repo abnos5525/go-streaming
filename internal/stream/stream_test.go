@@ -1,8 +1,6 @@
 package stream
 
 import (
-	"image"
-	"image/color"
 	"strings"
 	"testing"
 )
@@ -65,13 +63,6 @@ func TestRtpPacketAndAI(t *testing.T) {
 	if p := relayPort("e903d3fad593f281"); p < 30000 || p >= 50000 {
 		t.Fatal(p)
 	}
-	x := make([]byte, 20)
-	x[0], x[1] = 0x90, 96
-	x[12], x[13], x[15], x[16] = 0xbe, 0xde, 1, 0xaa
-	prof, data := rtpExt(x)
-	if prof != 0xbede || len(data) != 4 || data[0] != 0xaa {
-		t.Fatalf("ext %x %x", prof, data)
-	}
 }
 
 func TestH264NALsNoPanic(t *testing.T) {
@@ -125,62 +116,5 @@ func TestTracksFromProbe(t *testing.T) {
 	]}`))
 	if len(got) != 2 || got[0].Width != 1920 || got[0].Handler != "Video" || got[1].Type != "data" {
 		t.Fatal(got)
-	}
-}
-
-func TestNeonRuns(t *testing.T) {
-	img := image.NewRGBA(image.Rect(0, 0, 80, 80))
-	for y := 0; y < 80; y++ {
-		for x := 0; x < 80; x++ {
-			img.Set(x, y, color.RGBA{220, 220, 210, 255})
-		}
-	}
-	if neonRuns(img) != 0 {
-		t.Fatal("white wall")
-	}
-	for x := 10; x < 60; x++ {
-		img.Set(x, 20, color.RGBA{0, 255, 0, 255})
-		img.Set(x, 50, color.RGBA{0, 255, 0, 255})
-	}
-	for y := 20; y <= 50; y++ {
-		img.Set(10, y, color.RGBA{0, 255, 0, 255})
-		img.Set(59, y, color.RGBA{0, 255, 0, 255})
-	}
-	if neonRuns(img) < 2 {
-		t.Fatal(neonRuns(img))
-	}
-}
-
-func TestOverlayVerdict(t *testing.T) {
-	got := overlayVerdict(OverlayCheck{H264: true, AIBoxes: 11, NALs: map[string]int{"1": 1}, HLS: FrameSnap{Neon: 0}})
-	if !strings.Contains(got, "did not paint") && !strings.Contains(got, "no H265") {
-		t.Fatal(got)
-	}
-	got = overlayVerdict(OverlayCheck{H264: true, AIBoxes: 11, HLS: FrameSnap{Neon: 20}})
-	if !strings.Contains(got, "painted") {
-		t.Fatal(got)
-	}
-	pkt := make([]byte, 2)
-	pkt[0], pkt[1] = 28, 5
-	if nalType(pkt) != 5 {
-		t.Fatal(nalType(pkt))
-	}
-	sps := []byte{0x42, 0x01}
-	if hevcType(sps) != 33 || hevcNAL(sps) != 33 {
-		t.Fatal(hevcNAL(sps))
-	}
-	h264p := []byte{0x41, 0x00, 0x00}
-	if hevcNAL(h264p) != 0 {
-		t.Fatal("h264 p-slice counted as hevc vps")
-	}
-	img := image.NewRGBA(image.Rect(0, 0, 80, 80))
-	for y := 0; y < 80; y++ {
-		for x := 0; x < 80; x++ {
-			img.Set(x, y, color.RGBA{80, 80, 80, 255})
-		}
-	}
-	o := []AIObject{{BBox: BBox{X: 10, Y: 10, Width: 40, Height: 30}}}
-	if boxEdge(img, o) >= 0.35 {
-		t.Fatal("plain")
 	}
 }

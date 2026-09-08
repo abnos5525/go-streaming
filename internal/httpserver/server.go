@@ -4,10 +4,10 @@ import (
 	"log"
 
 	"github.com/gin-gonic/gin"
+	"project1/internal/auth"
 	"project1/internal/config"
 	"project1/internal/controllers"
 	"project1/internal/swagger"
-	"project1/internal/utils"
 )
 
 func Run() {
@@ -17,7 +17,7 @@ func Run() {
 	r.Use(gin.Recovery())
 	swagger.Register(r)
 	controllers.Register(r)
-	if err := utils.Check(); err != nil {
+	if err := auth.Check(); err != nil {
 		log.Printf("hafez connection failed — %v", err)
 	} else {
 		log.Print("hafez connected")

@@ -34,23 +34,6 @@ type streamID struct {
 	ID string `path:"id"`
 }
 
-type overlayCheck struct {
-	H264     bool           `json:"h264"`
-	Codec    string         `json:"codec,omitempty"`
-	PixFmt   string         `json:"pix_fmt,omitempty"`
-	FFmpeg   string         `json:"ffmpeg"`
-	Packets  int            `json:"packets"`
-	Payloads []int          `json:"payloads,omitempty"`
-	NALs     map[string]int `json:"nals,omitempty"`
-	HEVC     bool           `json:"hevc"`
-	HEVCNALs map[string]int `json:"hevc_nals,omitempty"`
-	AIBoxes  int            `json:"ai_boxes"`
-	Source   any            `json:"source"`
-	HLS      any            `json:"hls"`
-	Other    any            `json:"other"`
-	Verdict  string         `json:"verdict"`
-}
-
 type streamTrack struct {
 	Type    string `json:"type"`
 	Codec   string `json:"codec"`
@@ -113,6 +96,16 @@ func spec() []byte {
 	if err := r.AddOperation(meta); err != nil {
 		panic(err)
 	}
+	one, err := r.NewOperationContext(http.MethodGet, "/stream/meta/{id}")
+	if err != nil {
+		panic(err)
+	}
+	one.SetSummary("One stream status")
+	one.AddReqStructure(new(streamID))
+	one.AddRespStructure(new(streamMeta), func(cu *openapi.ContentUnit) { cu.HTTPStatus = http.StatusOK })
+	if err := r.AddOperation(one); err != nil {
+		panic(err)
+	}
 	st, err := r.NewOperationContext(http.MethodPost, "/stream/start")
 	if err != nil {
 		panic(err)
@@ -131,16 +124,6 @@ func spec() []byte {
 	sp.AddReqStructure(new(streamStart))
 	sp.AddRespStructure(new(streamMsg), func(cu *openapi.ContentUnit) { cu.HTTPStatus = http.StatusOK })
 	if err := r.AddOperation(sp); err != nil {
-		panic(err)
-	}
-	ck, err := r.NewOperationContext(http.MethodGet, "/stream/check/{id}")
-	if err != nil {
-		panic(err)
-	}
-	ck.SetSummary("Compare UDP source vs HLS: is it H264, did we strip AI overlay")
-	ck.AddReqStructure(new(streamID))
-	ck.AddRespStructure(new(overlayCheck), func(cu *openapi.ContentUnit) { cu.HTTPStatus = http.StatusOK })
-	if err := r.AddOperation(ck); err != nil {
 		panic(err)
 	}
 	b, err := json.Marshal(r.Spec)
