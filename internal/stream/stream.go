@@ -2,8 +2,10 @@ package stream
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -27,20 +29,31 @@ type session struct {
 	proc          *os.Process
 	gen           int
 	running       bool
+	tracks        []Track
+}
+
+type Track struct {
+	Type    string `json:"type"`
+	Codec   string `json:"codec"`
+	Handler string `json:"handler,omitempty"`
+	Width   int    `json:"width,omitempty"`
+	Height  int    `json:"height,omitempty"`
+	FPS     string `json:"fps,omitempty"`
+}
+
+type Meta struct {
+	URL     string  `json:"url"`
+	RTSP    string  `json:"rtsp"`
+	Started bool    `json:"started"`
+	Ready   bool    `json:"ready"`
+	Error   string  `json:"error,omitempty"`
+	Tracks  []Track `json:"tracks,omitempty"`
 }
 
 var (
 	mu       sync.Mutex
 	sessions = map[string]*session{}
 )
-
-type Meta struct {
-	URL     string `json:"url"`
-	RTSP    string `json:"rtsp"`
-	Started bool   `json:"started"`
-	Ready   bool   `json:"ready"`
-	Error   string `json:"error,omitempty"`
-}
 
 func Dir() string { return dir }
 
@@ -66,7 +79,18 @@ func (s *session) playlist() string { return "/hls/" + s.id + "/index.m3u8" }
 
 func (s *session) meta() Meta {
 	_, err := os.Stat(filepath.Join(dir, s.id, "index.m3u8"))
-	return Meta{URL: s.playlist(), RTSP: s.url, Started: s.running, Ready: err == nil, Error: s.last}
+	return Meta{URL: s.playlist(), RTSP: s.url, Started: s.running, Ready: err == nil, Error: s.last, Tracks: s.tracks}
+}
+
+func ByID(id string) (Meta, bool) {
+	mu.Lock()
+	defer mu.Unlock()
+	for _, s := range sessions {
+		if s.id == id {
+			return s.meta(), true
+		}
+	}
+	return Meta{}, false
 }
 
 func idFor(url string) string {
@@ -233,6 +257,12 @@ func (s *session) loop(my int) {
 	}
 	in := ffmpegInput(s.url)
 	log.Printf("hls %s input %s", s.id, in)
+	go func() {
+		tr := probe(s.url)
+		mu.Lock()
+		s.tracks = tr
+		mu.Unlock()
+	}()
 	out := filepath.Join(dir, s.id, "index.m3u8")
 	for {
 		if !s.alive(my) {
@@ -300,6 +330,50 @@ func (s *session) stopIf(my int) {
 func wipe(id string) {
 	_ = os.RemoveAll(filepath.Join(dir, id))
 	_ = os.MkdirAll(filepath.Join(dir, id), 0o755)
+}
+
+func probe(raw string) []Track {
+	in := ffmpegInput(raw)
+	args := []string{"-v", "error"}
+	low := strings.ToLower(in)
+	if strings.HasPrefix(low, "rtsp://") || strings.HasPrefix(low, "rtsps://") {
+		args = append(args, "-rtsp_transport", "tcp")
+	} else {
+		args = append(args, "-protocol_whitelist", "file,udp,rtp,crypto")
+	}
+	args = append(args, "-show_streams", "-of", "json", "-i", in)
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ffprobe", args...).Output()
+	if err != nil {
+		return nil
+	}
+	return tracksFromProbe(out)
+}
+
+func tracksFromProbe(b []byte) []Track {
+	var p struct {
+		Streams []struct {
+			CodecType  string            `json:"codec_type"`
+			CodecName  string            `json:"codec_name"`
+			Width      int               `json:"width"`
+			Height     int               `json:"height"`
+			RFrameRate string            `json:"r_frame_rate"`
+			Tags       map[string]string `json:"tags"`
+		} `json:"streams"`
+	}
+	if json.Unmarshal(b, &p) != nil {
+		return nil
+	}
+	out := make([]Track, 0, len(p.Streams))
+	for _, s := range p.Streams {
+		t := Track{Type: s.CodecType, Codec: s.CodecName, Width: s.Width, Height: s.Height, Handler: s.Tags["handler_name"]}
+		if s.RFrameRate != "" && s.RFrameRate != "0/0" {
+			t.FPS = s.RFrameRate
+		}
+		out = append(out, t)
+	}
+	return out
 }
 
 func (s *session) set(msg string) {

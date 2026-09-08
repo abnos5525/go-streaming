@@ -12,7 +12,14 @@ import (
 func playPage(id string) string {
 	src := "/hls/" + id + "/index.m3u8"
 	return `<!doctype html>
-<video id="v" autoplay playsinline muted controls style="width:100%;background:#000"></video>
+<meta charset="utf-8">
+<style>
+body{margin:0;background:#111;color:#eee;font:13px sans-serif}
+#meta{position:absolute;top:8px;left:8px;z-index:1;background:#000c;padding:8px 10px;max-width:42%}
+video{width:100%;background:#000;display:block}
+</style>
+<pre id="meta">metadata…</pre>
+<video id="v" autoplay playsinline muted controls></video>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
 <script>
 const v = document.getElementById('v');
@@ -24,6 +31,18 @@ if (window.Hls && Hls.isSupported()) {
 } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
   v.src = src;
 }
+function line(t){
+  const size = t.width ? t.width+'x'+t.height : '';
+  return [t.type, t.codec, size, t.fps, t.handler].filter(Boolean).join('  ');
+}
+function poll(){
+  fetch('/stream/meta/` + id + `').then(r=>r.json()).then(m=>{
+    const rows = (m.tracks||[]).map(line);
+    document.getElementById('meta').textContent = rows.join('\n') || 'no stream tracks yet';
+  }).catch(()=>{});
+}
+poll();
+setInterval(poll, 2000);
 </script>`
 }
 
@@ -39,6 +58,15 @@ func registerStream(r *gin.Engine) {
 	})
 	r.GET("/stream/meta", func(c *gin.Context) {
 		c.JSON(http.StatusOK, stream.Status())
+	})
+	r.GET("/stream/meta/:id", func(c *gin.Context) {
+		id := c.Param("id")
+		m, ok := stream.ByID(id)
+		if !ok {
+			c.JSON(http.StatusNotFound, gin.H{"message": "unknown stream"})
+			return
+		}
+		c.JSON(http.StatusOK, m)
 	})
 	r.POST("/stream/start", func(c *gin.Context) {
 		var req struct {

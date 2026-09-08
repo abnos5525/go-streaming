@@ -30,12 +30,22 @@ type streamMsg struct {
 	Message string `json:"message"`
 }
 
+type streamTrack struct {
+	Type    string `json:"type"`
+	Codec   string `json:"codec"`
+	Width   int    `json:"width,omitempty"`
+	Height  int    `json:"height,omitempty"`
+	FPS     string `json:"fps,omitempty"`
+	Handler string `json:"handler,omitempty"`
+}
+
 type streamMeta struct {
-	URL     string `json:"url"`
-	RTSP    string `json:"rtsp"`
-	Started bool   `json:"started"`
-	Ready   bool   `json:"ready"`
-	Error   string `json:"error,omitempty"`
+	URL     string        `json:"url"`
+	RTSP    string        `json:"rtsp"`
+	Started bool          `json:"started"`
+	Ready   bool          `json:"ready"`
+	Error   string        `json:"error,omitempty"`
+	Tracks  []streamTrack `json:"tracks,omitempty"`
 }
 
 func spec() []byte {
@@ -78,6 +88,15 @@ func spec() []byte {
 	meta.SetSummary("HLS playlist status")
 	meta.AddRespStructure(new([]streamMeta), func(cu *openapi.ContentUnit) { cu.HTTPStatus = http.StatusOK })
 	if err := r.AddOperation(meta); err != nil {
+		panic(err)
+	}
+	one, err := r.NewOperationContext(http.MethodGet, "/stream/meta/{id}")
+	if err != nil {
+		panic(err)
+	}
+	one.SetSummary("One stream status and tracks")
+	one.AddRespStructure(new(streamMeta), func(cu *openapi.ContentUnit) { cu.HTTPStatus = http.StatusOK })
+	if err := r.AddOperation(one); err != nil {
 		panic(err)
 	}
 	st, err := r.NewOperationContext(http.MethodPost, "/stream/start")

@@ -36,3 +36,13 @@ func TestFFmpegInputMulticast(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestTracksFromProbe(t *testing.T) {
+	got := tracksFromProbe([]byte(`{"streams":[
+		{"codec_type":"video","codec_name":"h264","width":1920,"height":1080,"r_frame_rate":"25/1","tags":{"handler_name":"Video"}},
+		{"codec_type":"data","codec_name":"bin_data"}
+	]}`))
+	if len(got) != 2 || got[0].Width != 1920 || got[0].Handler != "Video" || got[1].Type != "data" {
+		t.Fatal(got)
+	}
+}
