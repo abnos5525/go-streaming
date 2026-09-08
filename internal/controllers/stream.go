@@ -24,9 +24,12 @@ img{max-width:100%;margin-top:8px}
 </style>
 <video id="v" autoplay playsinline muted controls></video>
 <div id="bar">
-<button id="chk">check AI overlay</button>
+<button id="chk">check source vs HLS</button>
 <pre id="out"></pre>
-<img id="snap" hidden>
+<p>UDP source</p>
+<img id="src" hidden>
+<p>our HLS</p>
+<img id="hls" hidden>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
 <script>
@@ -41,12 +44,15 @@ if (window.Hls && Hls.isSupported()) {
 }
 document.getElementById('chk').onclick = () => {
   const out = document.getElementById('out');
-  const im = document.getElementById('snap');
+  document.getElementById('hls').hidden = true;
+  document.getElementById('src').hidden = true;
   out.textContent = 'checking…';
-  im.hidden = true;
   fetch('/stream/check/` + id + `').then(r => r.json()).then(j => {
     out.textContent = JSON.stringify(j, null, 2);
-    if (j.snap) { im.src = j.snap + '?' + Date.now(); im.hidden = false; }
+    const hls = document.getElementById('hls');
+    const src = document.getElementById('src');
+    if (j.hls && j.hls.snap) { hls.src = j.hls.snap + '?' + Date.now(); hls.hidden = false; }
+    if (j.source && j.source.snap) { src.src = j.source.snap + '?' + Date.now(); src.hidden = false; }
   }).catch(e => { out.textContent = String(e); });
 };
 </script>`

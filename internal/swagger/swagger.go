@@ -35,11 +35,17 @@ type streamID struct {
 }
 
 type overlayCheck struct {
-	BurnedIn bool   `json:"burned_in"`
-	Runs     int    `json:"neon_runs"`
-	Boxes    int    `json:"ai_boxes"`
-	Snap     string `json:"snap"`
-	Look     string `json:"look"`
+	H264     bool           `json:"h264"`
+	Codec    string         `json:"codec,omitempty"`
+	PixFmt   string         `json:"pix_fmt,omitempty"`
+	FFmpeg   string         `json:"ffmpeg"`
+	Packets  int            `json:"packets"`
+	Payloads []int          `json:"payloads,omitempty"`
+	NALs     map[string]int `json:"nals,omitempty"`
+	AIBoxes  int            `json:"ai_boxes"`
+	Source   any            `json:"source"`
+	HLS      any            `json:"hls"`
+	Verdict  string         `json:"verdict"`
 }
 
 type streamTrack struct {
@@ -128,7 +134,7 @@ func spec() []byte {
 	if err != nil {
 		panic(err)
 	}
-	ck.SetSummary("Check if AI boxes are painted into the video")
+	ck.SetSummary("Compare UDP source vs HLS: is it H264, did we strip AI overlay")
 	ck.AddReqStructure(new(streamID))
 	ck.AddRespStructure(new(overlayCheck), func(cu *openapi.ContentUnit) { cu.HTTPStatus = http.StatusOK })
 	if err := r.AddOperation(ck); err != nil {

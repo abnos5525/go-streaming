@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,6 +39,9 @@ type session struct {
 	tracks        []Track
 	rtpTS         atomic.Uint32
 	frame         *AIFrame
+	pts           map[int]struct{}
+	nals          map[int]int
+	pkts          int
 }
 
 type Track struct {
@@ -722,11 +726,13 @@ func (s *session) sniff(my int, mc *net.UDPConn, relay int) {
 		}
 		s.rtpTS.Store(ts)
 		if pt != 96 {
+			s.notePkt(pt, 0)
 			if f := parseAI(payload); f != nil {
 				s.setFrame(f)
 			}
 			continue
 		}
+		s.notePkt(96, nalType(payload))
 		for _, nal := range h264NALs(payload, &fu) {
 			if f := nalAI(nal); f != nil {
 				s.setFrame(f)
@@ -803,12 +809,51 @@ func (s *session) set(msg string) {
 	mu.Unlock()
 }
 
+func (s *session) notePkt(pt, nal int) {
+	mu.Lock()
+	s.pkts++
+	if s.pts == nil {
+		s.pts = map[int]struct{}{}
+	}
+	s.pts[pt] = struct{}{}
+	if nal > 0 {
+		if s.nals == nil {
+			s.nals = map[int]int{}
+		}
+		s.nals[nal]++
+	}
+	mu.Unlock()
+}
+
+func nalType(p []byte) int {
+	if len(p) == 0 {
+		return 0
+	}
+	t := int(p[0] & 0x1f)
+	if t == 28 && len(p) > 1 {
+		return int(p[1] & 0x1f)
+	}
+	return t
+}
+
+type FrameSnap struct {
+	Snap string `json:"snap,omitempty"`
+	Neon int    `json:"neon_runs"`
+	Err  string `json:"error,omitempty"`
+}
+
 type OverlayCheck struct {
-	BurnedIn bool   `json:"burned_in"`
-	Runs     int    `json:"neon_runs"`
-	Boxes    int    `json:"ai_boxes"`
-	Snap     string `json:"snap"`
-	Look     string `json:"look"`
+	H264     bool           `json:"h264"`
+	Codec    string         `json:"codec,omitempty"`
+	PixFmt   string         `json:"pix_fmt,omitempty"`
+	FFmpeg   string         `json:"ffmpeg"`
+	Packets  int            `json:"packets"`
+	Payloads []int          `json:"payloads,omitempty"`
+	NALs     map[string]int `json:"nals,omitempty"`
+	AIBoxes  int            `json:"ai_boxes"`
+	Source   FrameSnap      `json:"source"`
+	HLS      FrameSnap      `json:"hls"`
+	Verdict  string         `json:"verdict"`
 }
 
 func CheckOverlay(id string) (OverlayCheck, error) {
@@ -823,43 +868,108 @@ func CheckOverlay(id string) (OverlayCheck, error) {
 			break
 		}
 	}
+	if s == nil {
+		mu.Unlock()
+		return OverlayCheck{}, fmt.Errorf("unknown stream")
+	}
+	srcURL, pkts := s.url, s.pkts
 	var nbox int
-	if s != nil && s.frame != nil {
+	if s.frame != nil {
 		for _, r := range s.frame.Results {
 			nbox += len(r.Objects)
 		}
 	}
+	nals := map[string]int{}
+	for k, v := range s.nals {
+		nals[strconv.Itoa(k)] = v
+	}
+	var pts []int
+	for p := range s.pts {
+		pts = append(pts, p)
+	}
 	mu.Unlock()
-	if s == nil {
-		return OverlayCheck{}, fmt.Errorf("unknown stream")
+	sort.Ints(pts)
+
+	hlsPath := filepath.Join(dir, id, "snap.jpg")
+	srcPath := filepath.Join(dir, id, "src.jpg")
+	out := OverlayCheck{FFmpeg: "copy", Packets: pkts, Payloads: pts, NALs: nals, AIBoxes: nbox}
+	out.Codec, out.PixFmt = probeVideo(filepath.Join(dir, id, "index.m3u8"))
+	out.H264 = out.Codec == "h264" || nals["1"] > 0 || nals["7"] > 0
+	out.HLS = grabSnap(filepath.Join(dir, id, "index.m3u8"), hlsPath, "/hls/"+id+"/snap.jpg")
+	out.Source = grabSnap(ffmpegInput(srcURL), srcPath, "/hls/"+id+"/src.jpg")
+	out.Verdict = overlayVerdict(out)
+	return out, nil
+}
+
+func overlayVerdict(o OverlayCheck) string {
+	if !o.H264 {
+		return "not h264 (" + o.Codec + ") — check the camera, not overlay"
 	}
-	playlist := filepath.Join(dir, id, "index.m3u8")
-	snap := filepath.Join(dir, id, "snap.jpg")
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-loglevel", "error",
-		"-y", "-protocol_whitelist", "file,crypto,data", "-allowed_extensions", "ALL",
-		"-i", playlist, "-frames:v", "1", snap)
-	if err := cmd.Run(); err != nil {
-		return OverlayCheck{}, fmt.Errorf("no frame yet: %v", err)
+	src, hls := o.Source.Neon, o.HLS.Neon
+	switch {
+	case o.AIBoxes == 0:
+		return "no AI JSON on this UDP"
+	case src == 0 && hls == 0:
+		return "AI JSON only. UDP source and our HLS both have no painted boxes — not our pipeline"
+	case src > 0 && hls == 0:
+		return "boxes on UDP source, missing on HLS — our ffmpeg/HLS stripped them"
+	case src == 0 && hls > 0:
+		return "boxes only after HLS — unexpected"
+	default:
+		return "boxes painted into the video (source and HLS)"
 	}
-	f, err := os.Open(snap)
+}
+
+func grabSnap(in, file, url string) FrameSnap {
+	if err := grabJPEG(in, file); err != nil {
+		return FrameSnap{Err: err.Error()}
+	}
+	f, err := os.Open(file)
 	if err != nil {
-		return OverlayCheck{}, err
+		return FrameSnap{Snap: url, Err: err.Error()}
 	}
 	defer f.Close()
 	img, err := jpeg.Decode(f)
 	if err != nil {
-		return OverlayCheck{}, err
+		return FrameSnap{Snap: url, Err: err.Error()}
 	}
-	runs := neonRuns(img)
-	return OverlayCheck{
-		BurnedIn: runs >= 12,
-		Runs:     runs,
-		Boxes:    nbox,
-		Snap:     "/hls/" + id + "/snap.jpg",
-		Look: "snap.jpg is the answer. burned_in only counts neon green/red/yellow lines, not lights or TVs",
-	}, nil
+	return FrameSnap{Snap: url, Neon: neonRuns(img)}
+}
+
+func grabJPEG(in, out string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	args := []string{"-hide_banner", "-loglevel", "error", "-y"}
+	low := strings.ToLower(in)
+	if strings.HasPrefix(low, "rtsp://") || strings.HasPrefix(low, "rtsps://") {
+		args = append(args, "-rtsp_transport", "tcp")
+	} else {
+		args = append(args, "-protocol_whitelist", "file,udp,rtp,crypto,data", "-allowed_extensions", "ALL")
+	}
+	args = append(args, "-i", in, "-an", "-frames:v", "1", "-q:v", "2", out)
+	return exec.CommandContext(ctx, "ffmpeg", args...).Run()
+}
+
+func probeVideo(playlist string) (codec, pix string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	b, err := exec.CommandContext(ctx, "ffprobe", "-v", "error",
+		"-protocol_whitelist", "file,crypto,data", "-allowed_extensions", "ALL",
+		"-select_streams", "v:0", "-show_entries", "stream=codec_name,pix_fmt",
+		"-of", "json", "-i", playlist).Output()
+	if err != nil {
+		return "", ""
+	}
+	var p struct {
+		Streams []struct {
+			CodecName string `json:"codec_name"`
+			PixFmt    string `json:"pix_fmt"`
+		} `json:"streams"`
+	}
+	if json.Unmarshal(b, &p) != nil || len(p.Streams) == 0 {
+		return "", ""
+	}
+	return p.Streams[0].CodecName, p.Streams[0].PixFmt
 }
 
 func paintLike(c color.Color) bool {

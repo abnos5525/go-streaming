@@ -143,3 +143,19 @@ func TestNeonRuns(t *testing.T) {
 		t.Fatal(neonRuns(img))
 	}
 }
+
+func TestOverlayVerdict(t *testing.T) {
+	got := overlayVerdict(OverlayCheck{H264: true, AIBoxes: 11, Source: FrameSnap{Neon: 0}, HLS: FrameSnap{Neon: 0}})
+	if !strings.Contains(got, "not our pipeline") {
+		t.Fatal(got)
+	}
+	got = overlayVerdict(OverlayCheck{H264: true, AIBoxes: 11, Source: FrameSnap{Neon: 20}, HLS: FrameSnap{Neon: 0}})
+	if !strings.Contains(got, "stripped") {
+		t.Fatal(got)
+	}
+	pkt := make([]byte, 2)
+	pkt[0], pkt[1] = 28, 5
+	if nalType(pkt) != 5 {
+		t.Fatal(nalType(pkt))
+	}
+}
