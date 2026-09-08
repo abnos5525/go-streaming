@@ -90,6 +90,7 @@ type Meta struct {
 var (
 	mu       sync.Mutex
 	sessions = map[string]*session{}
+	lastAI   *AIFrame
 )
 
 func Dir() string { return dir }
@@ -135,13 +136,26 @@ func PutAI(id string, body []byte) error {
 	}
 	mu.Lock()
 	defer mu.Unlock()
+	applyAILocked(f)
 	for _, s := range sessions {
 		if s.id == id {
-			s.frame = f
 			return nil
 		}
 	}
 	return fmt.Errorf("unknown stream")
+}
+
+func applyAILocked(f *AIFrame) {
+	lastAI = f
+	for _, s := range sessions {
+		s.frame = f
+	}
+}
+
+func ApplyAI(f *AIFrame) {
+	mu.Lock()
+	applyAILocked(f)
+	mu.Unlock()
 }
 
 func ByID(id string) (Meta, bool) {
@@ -254,7 +268,23 @@ func multicastURL(raw string) *url.URL {
 	return u
 }
 
+func wrapAI(raw []byte) []byte {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return raw
+	}
+	if raw[0] != '{' && bytes.HasPrefix(raw, []byte(`"camera"`)) {
+		out := make([]byte, 0, len(raw)+2)
+		out = append(out, '{')
+		out = append(out, raw...)
+		out = append(out, '}')
+		return out
+	}
+	return raw
+}
+
 func parseAI(raw []byte) *AIFrame {
+	raw = wrapAI(raw)
 	var f AIFrame
 	if json.Unmarshal(raw, &f) != nil || len(f.Results) == 0 {
 		return nil
@@ -262,29 +292,184 @@ func parseAI(raw []byte) *AIFrame {
 	return &f
 }
 
+func looksLikeAI(b []byte) bool {
+	return bytes.Contains(b, []byte(`"results"`)) ||
+		bytes.Contains(b, []byte(`"camera"`)) ||
+		bytes.Contains(b, []byte(`FaceAnalysis`)) ||
+		bytes.Contains(b, []byte(`"type_message"`))
+}
+
+func scanAI(b []byte) *AIFrame {
+	if !looksLikeAI(b) {
+		return nil
+	}
+	for i := 0; i < len(b); i++ {
+		if b[i] != '{' && !(b[i] == '"' && bytes.HasPrefix(b[i:], []byte(`"camera"`))) {
+			continue
+		}
+		dec := json.NewDecoder(bytes.NewReader(wrapAI(b[i:])))
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			continue
+		}
+		if f := parseAI(raw); f != nil {
+			return f
+		}
+	}
+	return nil
+}
+
 func feedJSON(buf *[]byte, chunk []byte) *AIFrame {
+	if len(*buf) == 0 && !looksLikeAI(chunk) {
+		return nil
+	}
 	*buf = append(*buf, chunk...)
-	i := bytes.IndexByte(*buf, '{')
-	if i < 0 {
-		if len(*buf) > 8192 {
-			*buf = (*buf)[:0]
+	if f := scanAI(*buf); f != nil {
+		*buf = (*buf)[:0]
+		return f
+	}
+	if len(*buf) > 512<<10 {
+		*buf = (*buf)[:0]
+	}
+	return nil
+}
+
+func unescapeRBSP(b []byte) []byte {
+	out := make([]byte, 0, len(b))
+	for i := 0; i < len(b); i++ {
+		if i+2 < len(b) && b[i] == 0 && b[i+1] == 0 && b[i+2] == 3 {
+			out = append(out, 0, 0)
+			i += 2
+			continue
 		}
+		out = append(out, b[i])
+	}
+	return out
+}
+
+func seiU(b []byte, off *int) int {
+	n := 0
+	for *off < len(b) {
+		v := b[*off]
+		*off++
+		n += int(v)
+		if v != 255 {
+			break
+		}
+	}
+	return n
+}
+
+func seiAI(rbsp []byte) *AIFrame {
+	off := 0
+	for off < len(rbsp) {
+		if rbsp[off] == 0x80 {
+			break
+		}
+		pt := seiU(rbsp, &off)
+		sz := seiU(rbsp, &off)
+		if sz < 0 || off+sz > len(rbsp) {
+			break
+		}
+		p := rbsp[off : off+sz]
+		off += sz
+		if f := scanAI(p); f != nil {
+			return f
+		}
+		if pt == 5 && len(p) > 16 {
+			if f := scanAI(p[16:]); f != nil {
+				return f
+			}
+		}
+	}
+	return scanAI(rbsp)
+}
+
+func nalAI(nal []byte) *AIFrame {
+	if len(nal) == 0 || nal[0]&0x1f != 6 {
 		return nil
 	}
-	if i > 0 {
-		*buf = (*buf)[i:]
-	}
-	dec := json.NewDecoder(bytes.NewReader(*buf))
-	var raw json.RawMessage
-	if err := dec.Decode(&raw); err != nil {
-		if len(*buf) > 512<<10 {
-			*buf = (*buf)[:0]
+	return seiAI(unescapeRBSP(nal[1:]))
+}
+
+func splitAnnexB(b []byte) [][]byte {
+	var out [][]byte
+	i := 0
+	for i < len(b) {
+		for i+3 <= len(b) && !(b[i] == 0 && b[i+1] == 0 && (b[i+2] == 1 || i+4 <= len(b) && b[i+2] == 0 && b[i+3] == 1)) {
+			i++
 		}
+		if i >= len(b) {
+			break
+		}
+		if b[i+2] == 1 {
+			i += 3
+		} else {
+			i += 4
+		}
+		j := i
+		for j+3 <= len(b) && !(b[j] == 0 && b[j+1] == 0 && (b[j+2] == 1 || j+4 <= len(b) && b[j+2] == 0 && b[j+3] == 1)) {
+			j++
+		}
+		if j > i {
+			out = append(out, b[i:j])
+		}
+		i = j
+	}
+	return out
+}
+
+func extractAI(b []byte) *AIFrame {
+	if f := scanAI(b); f != nil {
+		return f
+	}
+	for _, nal := range splitAnnexB(b) {
+		if f := nalAI(nal); f != nil {
+			return f
+		}
+	}
+	return nalAI(b)
+}
+
+func h264NALs(payload []byte, fu *[]byte) [][]byte {
+	if len(payload) < 1 {
 		return nil
 	}
-	rest := (*buf)[int(dec.InputOffset()):]
-	*buf = append([]byte(nil), rest...)
-	return parseAI(raw)
+	nal := payload[0] & 0x1f
+	switch nal {
+	case 24:
+		var out [][]byte
+		off := 1
+		for off+2 <= len(payload) {
+			n := int(payload[off])<<8 | int(payload[off+1])
+			off += 2
+			if n <= 0 || off+n > len(payload) {
+				break
+			}
+			out = append(out, payload[off:off+n])
+			off += n
+		}
+		return out
+	case 28:
+		if len(payload) < 2 {
+			return nil
+		}
+		hdr := payload[1]
+		orig := hdr & 0x1f
+		if hdr&0x80 != 0 {
+			*fu = append([]byte{payload[0]&0xe0 | orig}, payload[2:]...)
+		} else if len(*fu) > 0 {
+			*fu = append(*fu, payload[2:]...)
+		}
+		if hdr&0x40 != 0 && len(*fu) > 0 {
+			n := *fu
+			*fu = nil
+			return [][]byte{n}
+		}
+		return nil
+	default:
+		return [][]byte{payload}
+	}
 }
 
 func rtpSDP(u *url.URL) string {
@@ -354,74 +539,6 @@ func rtpPacket(b []byte) (pt int, payload []byte, ok bool) {
 	return int(b[1] & 0x7f), payload, true
 }
 
-func clipAI(s string) string {
-	s = strings.TrimSpace(s)
-	if len(s) > 2000 {
-		s = s[:2000]
-	}
-	return s
-}
-
-func printableAI(b []byte) string {
-	start := -1
-	for i, c := range b {
-		if c == '{' || c == '<' {
-			start = i
-			break
-		}
-	}
-	if start < 0 {
-		return ""
-	}
-	return clipAI(string(b[start:]))
-}
-
-func h264AI(payload []byte, fu *[]byte) string {
-	if len(payload) < 1 {
-		return ""
-	}
-	nal := payload[0] & 0x1f
-	switch nal {
-	case 6:
-		return printableAI(payload)
-	case 24:
-		off := 1
-		for off+2 <= len(payload) {
-			n := int(payload[off])<<8 | int(payload[off+1])
-			off += 2
-			if n <= 0 || off+n > len(payload) {
-				break
-			}
-			unit := payload[off : off+n]
-			off += n
-			if len(unit) > 0 && unit[0]&0x1f == 6 {
-				if t := printableAI(unit); t != "" {
-					return t
-				}
-			}
-		}
-	case 28:
-		if len(payload) < 2 {
-			return ""
-		}
-		hdr := payload[1]
-		if hdr&0x1f != 6 {
-			return ""
-		}
-		if hdr&0x80 != 0 {
-			*fu = append([]byte{payload[0]&0xe0 | 6}, payload[2:]...)
-		} else if len(*fu) > 0 {
-			*fu = append(*fu, payload[2:]...)
-		}
-		if hdr&0x40 != 0 && len(*fu) > 0 {
-			t := printableAI(*fu)
-			*fu = nil
-			return t
-		}
-	}
-	return ""
-}
-
 func ffmpegCmd(in, out string) *exec.Cmd {
 	args := []string{"-hide_banner", "-loglevel", "error"}
 	low := strings.ToLower(in)
@@ -454,7 +571,7 @@ func Start(url string) (Meta, error) {
 		mu.Unlock()
 		return m, nil
 	}
-	s := &session{url: url, id: idFor(url), running: true, gen: 1}
+	s := &session{url: url, id: idFor(url), running: true, gen: 1, frame: lastAI}
 	sessions[url] = s
 	my := s.gen
 	mu.Unlock()
@@ -521,6 +638,7 @@ func (s *session) loop(my int) {
 	log.Printf("hls %s input %s", s.id, in)
 	out := filepath.Join(dir, s.id, "index.m3u8")
 	go s.probeWhenReady(my, out)
+	go s.watchAI(my)
 	for {
 		if !s.alive(my) {
 			return
@@ -633,24 +751,58 @@ func (s *session) sniff(my int, mc *net.UDPConn, relay int) {
 		pkt := buf[:n]
 		pt, payload, ok := rtpPacket(pkt)
 		if !ok {
-			if f := feedJSON(&acc, pkt); f != nil {
+			if f := extractAI(pkt); f != nil {
+				s.setFrame(f)
+			} else if f := feedJSON(&acc, pkt); f != nil {
 				s.setFrame(f)
 			}
 			continue
 		}
 		s.note(pt)
-		if pt == 96 {
-			if t := h264AI(payload, &fu); t != "" {
-				if f := parseAI([]byte(t)); f != nil {
+		if f := extractAI(payload); f != nil {
+			s.setFrame(f)
+		} else {
+			for _, nal := range h264NALs(payload, &fu) {
+				if f := nalAI(nal); f != nil {
 					s.setFrame(f)
 				}
 			}
+			if f := feedJSON(&acc, payload); f != nil {
+				s.setFrame(f)
+			}
+		}
+		if pt == 96 {
 			_, _ = out.Write(pkt)
-			continue
 		}
-		if f := feedJSON(&acc, payload); f != nil {
-			s.setFrame(f)
+	}
+}
+
+func (s *session) watchAI(my int) {
+	d := filepath.Join(dir, s.id)
+	for {
+		if !s.alive(my) {
+			return
 		}
+		files, _ := filepath.Glob(filepath.Join(d, "*.ts"))
+		var latest string
+		var mt time.Time
+		for _, p := range files {
+			fi, err := os.Stat(p)
+			if err != nil {
+				continue
+			}
+			if fi.ModTime().After(mt) {
+				mt, latest = fi.ModTime(), p
+			}
+		}
+		if latest != "" {
+			if b, err := os.ReadFile(latest); err == nil {
+				if f := extractAI(b); f != nil {
+					s.setFrame(f)
+				}
+			}
+		}
+		time.Sleep(time.Second)
 	}
 }
 

@@ -52,20 +52,28 @@ func TestRtpSDP(t *testing.T) {
 }
 
 func TestRtpPacketAndAI(t *testing.T) {
-	pkt := make([]byte, 12+8)
+	pkt := make([]byte, 12)
 	pkt[0] = 0x80
 	pkt[1] = 96
-	copy(pkt[12:], []byte{6, '{', '"', 'a', '"', ':', '1', '}'})
-	pt, payload, ok := rtpPacket(pkt)
-	if !ok || pt != 96 || printableAI(payload) != `{"a":1}` {
-		t.Fatalf("pt=%d ok=%v %q", pt, ok, printableAI(payload))
-	}
-	var fu []byte
-	if got := h264AI(payload, &fu); got != `{"a":1}` {
-		t.Fatal(got)
+	pt, _, ok := rtpPacket(pkt)
+	if !ok || pt != 96 {
+		t.Fatalf("pt=%d ok=%v", pt, ok)
 	}
 	if p := relayPort("e903d3fad593f281"); p < 30000 || p >= 50000 {
 		t.Fatal(p)
+	}
+}
+
+func TestSEIJSON(t *testing.T) {
+	js := []byte(`{"camera":{"id":"x"},"frame":{"timestamp":1},"results":[{"model":"FaceAnalysis","objects":[]}],"type_message":6}`)
+	p := append(make([]byte, 16), js...)
+	sei := []byte{0x06, 5, byte(len(p))}
+	sei = append(sei, p...)
+	sei = append(sei, 0x80)
+	ab := append([]byte{0, 0, 0, 1}, sei...)
+	f := extractAI(ab)
+	if f == nil || f.Results[0].Model != "FaceAnalysis" {
+		t.Fatal(f)
 	}
 }
 
@@ -83,6 +91,10 @@ func TestParseAIFrame(t *testing.T) {
 	got := feedJSON(&buf, raw[mid:])
 	if got == nil || got.TypeMessage != 6 {
 		t.Fatal(got)
+	}
+	naked := []byte(`"camera":{"id":"x"},"frame":{"timestamp":1},"results":[{"model":"FaceAnalysis","objects":[]}],"type_message":6`)
+	if parseAI(naked) == nil || parseAI(naked).Results[0].Model != "FaceAnalysis" {
+		t.Fatal("wrap")
 	}
 }
 
