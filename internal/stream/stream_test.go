@@ -3,6 +3,7 @@ package stream
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestStopNotRunning(t *testing.T) {
@@ -116,5 +117,45 @@ func TestTracksFromProbe(t *testing.T) {
 	]}`))
 	if len(got) != 2 || got[0].Width != 1920 || got[0].Handler != "Video" || got[1].Type != "data" {
 		t.Fatal(got)
+	}
+}
+
+func TestDelayedAI(t *testing.T) {
+	s := &session{}
+	base := int64(1_788_870_540_661)
+	for i := 0; i <= 10; i++ {
+		f := &AIFrame{}
+		f.Frame.Timestamp = base + int64(i)*1000
+		s.pushAI(f)
+	}
+	got := s.delayedAI(8000)
+	if got == nil || got.Frame.Timestamp != base+2000 {
+		t.Fatalf("want live-8s (%d), got %v", base+2000, got)
+	}
+	if got := s.delayedAI(3000); got == nil || got.Frame.Timestamp != base+7000 {
+		t.Fatalf("want live-3s, got %v", got)
+	}
+	same := &AIFrame{}
+	same.Frame.Timestamp = base + 10000
+	same.TypeMessage = 6
+	s.pushAI(same)
+	if s.buf[len(s.buf)-1].TypeMessage != 6 {
+		t.Fatal("same timestamp not replaced")
+	}
+}
+
+func TestPlaylistLagMS(t *testing.T) {
+	durs, files := parseEXTINF([]byte("#EXTM3U\n#EXTINF:2.0,\na.ts\n#EXTINF:2.0,\nb.ts\n#EXTINF:2.0,\nc.ts\n#EXTINF:1.5,\nd.ts\n"))
+	if len(durs) != 4 || len(files) != 4 || files[3] != "d.ts" {
+		t.Fatalf("parse %v %v", durs, files)
+	}
+	now := time.Unix(1_700_000_010, 0)
+	newest := now.Add(-400 * time.Millisecond)
+	got := playlistLagMS(durs, newest, now)
+	if got != 6400 {
+		t.Fatalf("want 6400 (6s+0.4s), got %d", got)
+	}
+	if playlistLagMS(durs, time.Time{}, now) != 7500 {
+		t.Fatalf("sum without mtime: %d", playlistLagMS(durs, time.Time{}, now))
 	}
 }

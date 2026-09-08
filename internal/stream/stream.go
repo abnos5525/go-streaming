@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +24,9 @@ import (
 const (
 	DefaultURL = "udp://224.2.0.1:5484"
 	dir        = "hls"
+	hlsTime    = 2
+	hlsList    = 4
+	aiDelayMS  = int64(hlsTime * hlsList * 1000)
 )
 
 type session struct {
@@ -32,7 +36,8 @@ type session struct {
 	running       bool
 	tracks        []Track
 	rtpTS         atomic.Uint32
-	frame         *AIFrame
+	delayMS       atomic.Int64
+	buf           []*AIFrame
 }
 
 type Track struct {
@@ -87,10 +92,12 @@ func Status() []Meta {
 func (s *session) playlist() string { return "/hls/" + s.id + "/index.m3u8" }
 
 func (s *session) meta() Meta {
+	lag := s.hlsLagMS()
 	_, err := os.Stat(filepath.Join(dir, s.id, "index.m3u8"))
 	mu.Lock()
 	defer mu.Unlock()
-	return Meta{URL: s.playlist(), RTSP: s.url, Started: s.running, Ready: err == nil, Error: s.last, Tracks: s.tracks, RTP: s.rtpTS.Load(), AI: s.frame}
+	s.delayMS.Store(lag)
+	return Meta{URL: s.playlist(), RTSP: s.url, Started: s.running, Ready: err == nil, Error: s.last, Tracks: s.tracks, RTP: s.rtpTS.Load(), AI: s.delayedAI(lag)}
 }
 
 func sessByID(id string) *session {
@@ -113,7 +120,7 @@ func PutAI(id string, body []byte) error {
 	if s == nil {
 		return fmt.Errorf("unknown stream")
 	}
-	s.frame = f
+	s.pushAI(f)
 	return nil
 }
 
@@ -234,8 +241,8 @@ func ffmpegCmd(in, out string) *exec.Cmd {
 		"-an",
 		"-c:v", "copy",
 		"-f", "hls",
-		"-hls_time", "2",
-		"-hls_list_size", "4",
+		"-hls_time", fmt.Sprintf("%d", hlsTime),
+		"-hls_list_size", fmt.Sprintf("%d", hlsList),
 		"-hls_segment_type", "mpegts",
 		"-hls_flags", "delete_segments+omit_endlist",
 		out,
@@ -254,6 +261,7 @@ func Start(url string) (Meta, error) {
 		return s.meta(), nil
 	}
 	s := &session{url: url, id: idFor(url), running: true, gen: 1}
+	s.delayMS.Store(aiDelayMS)
 	sessions[url] = s
 	my := s.gen
 	mu.Unlock()
@@ -390,9 +398,137 @@ func wipe(id string) {
 }
 
 func (s *session) setFrame(f *AIFrame) {
+	if f == nil {
+		return
+	}
 	mu.Lock()
-	s.frame = f
+	s.pushAI(f)
 	mu.Unlock()
+}
+
+func (s *session) pushAI(f *AIFrame) {
+	ts := f.Frame.Timestamp
+	n := len(s.buf)
+	switch {
+	case n > 0 && s.buf[n-1].Frame.Timestamp == ts:
+		s.buf[n-1] = f
+	case n == 0 || s.buf[n-1].Frame.Timestamp < ts:
+		s.buf = append(s.buf, f)
+	default:
+		i := 0
+		for i < n && s.buf[i].Frame.Timestamp < ts {
+			i++
+		}
+		if i < n && s.buf[i].Frame.Timestamp == ts {
+			s.buf[i] = f
+		} else {
+			s.buf = append(s.buf, nil)
+			copy(s.buf[i+1:], s.buf[i:])
+			s.buf[i] = f
+		}
+	}
+	latest := s.buf[len(s.buf)-1].Frame.Timestamp
+	keep := s.delayMS.Load()
+	if keep < aiDelayMS {
+		keep = aiDelayMS
+	}
+	cut := latest - keep - 4000
+	i := 0
+	for i < len(s.buf) && s.buf[i].Frame.Timestamp < cut {
+		i++
+	}
+	s.buf = s.buf[i:]
+	if n := len(s.buf); n > 400 {
+		s.buf = s.buf[n-400:]
+	}
+}
+
+func (s *session) delayedAI(delayMS int64) *AIFrame {
+	if len(s.buf) == 0 {
+		return nil
+	}
+	if delayMS <= 0 {
+		delayMS = aiDelayMS
+	}
+	target := s.buf[len(s.buf)-1].Frame.Timestamp - delayMS
+	var best *AIFrame
+	for _, f := range s.buf {
+		if f.Frame.Timestamp <= target {
+			best = f
+		}
+	}
+	if best != nil {
+		return best
+	}
+	return s.buf[0]
+}
+
+func parseEXTINF(b []byte) (durs []float64, files []string) {
+	lines := strings.Split(string(b), "\n")
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(line, "#EXTINF:") {
+			continue
+		}
+		rest := strings.TrimPrefix(line, "#EXTINF:")
+		rest, _, _ = strings.Cut(rest, ",")
+		d, err := strconv.ParseFloat(strings.TrimSpace(rest), 64)
+		if err != nil || d <= 0 {
+			continue
+		}
+		durs = append(durs, d)
+		if i+1 < len(lines) {
+			n := strings.TrimSpace(lines[i+1])
+			if n != "" && !strings.HasPrefix(n, "#") {
+				files = append(files, n)
+			}
+		}
+	}
+	return durs, files
+}
+
+func playlistLagMS(durs []float64, newest, now time.Time) int64 {
+	if len(durs) == 0 {
+		return 0
+	}
+	var sum float64
+	for _, d := range durs {
+		sum += d
+	}
+	delay := sum
+	last := durs[len(durs)-1]
+	if !newest.IsZero() {
+		age := now.Sub(newest).Seconds()
+		if age < 0 {
+			age = 0
+		}
+		delay = sum - last + age
+		if delay < last {
+			delay = sum
+		}
+	}
+	return int64(delay * 1000)
+}
+
+func (s *session) hlsLagMS() int64 {
+	b, err := os.ReadFile(filepath.Join(dir, s.id, "index.m3u8"))
+	if err != nil {
+		if v := s.delayMS.Load(); v > 0 {
+			return v
+		}
+		return aiDelayMS
+	}
+	durs, files := parseEXTINF(b)
+	var newest time.Time
+	if len(files) > 0 {
+		if st, err := os.Stat(filepath.Join(dir, s.id, filepath.Base(files[len(files)-1]))); err == nil {
+			newest = st.ModTime()
+		}
+	}
+	if ms := playlistLagMS(durs, newest, time.Now()); ms > 0 {
+		return ms
+	}
+	return aiDelayMS
 }
 
 func (s *session) probeWhenReady(my int, playlist string) {
