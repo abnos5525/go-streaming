@@ -22,8 +22,8 @@ func Run() {
 	} else {
 		log.Print("hafez connected")
 	}
-	log.Print("server running at http://127.0.0.1:8080")
-	log.Print("swagger at http://127.0.0.1:8080/api/doc")
+	log.Print("server running at http://127.0.0.1:8085")
+	log.Print("swagger at http://127.0.0.1:8085/api/doc")
 	log.Print("POST /stream/start  then /play/{id}")
-	log.Fatal(r.Run(":8080"))
+	log.Fatal(r.Run(":8085"))
 }

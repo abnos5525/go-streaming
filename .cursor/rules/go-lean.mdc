@@ -11,4 +11,4 @@ Use **ponytail** (full) and **lean-build** on every coding task in this repo.
 - Fewest files, shortest working code. No scaffolding for later.
 - No extra endpoints, config, middleware, Docker, or README unless requested.
 - Surface errors; no empty catches. Validate only at trust boundaries.
-- After verifying, stop the server yourself. Never leave :8080 / hello.exe running.
+- After verifying, stop the server yourself. Never leave :8085 / hello.exe running.

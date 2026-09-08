@@ -3,3 +3,5 @@ hello.exe
 server.log
 server.err
 hls/
+
+.cursor/

@@ -90,15 +90,6 @@ func spec() []byte {
 	if err := r.AddOperation(meta); err != nil {
 		panic(err)
 	}
-	one, err := r.NewOperationContext(http.MethodGet, "/stream/meta/{id}")
-	if err != nil {
-		panic(err)
-	}
-	one.SetSummary("One stream status and tracks")
-	one.AddRespStructure(new(streamMeta), func(cu *openapi.ContentUnit) { cu.HTTPStatus = http.StatusOK })
-	if err := r.AddOperation(one); err != nil {
-		panic(err)
-	}
 	st, err := r.NewOperationContext(http.MethodPost, "/stream/start")
 	if err != nil {
 		panic(err)
