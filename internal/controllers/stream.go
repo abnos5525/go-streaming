@@ -73,7 +73,10 @@ func registerStream(r *gin.Engine) {
 		var req struct {
 			URL string `json:"url"`
 		}
-		_ = c.ShouldBindJSON(&req)
+		if err := c.ShouldBindJSON(&req); err != nil && c.Request.ContentLength != 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"message": err.Error()})
+			return
+		}
 		m, err := stream.Start(req.URL)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"message": err.Error()})

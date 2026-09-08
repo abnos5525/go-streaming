@@ -46,7 +46,7 @@ func TestRtpSDP(t *testing.T) {
 		t.Fatal("nil")
 	}
 	s := rtpSDP(u)
-	if !strings.Contains(s, "224.2.0.1") || !strings.Contains(s, "5484") || !strings.Contains(s, "H264/90000") {
+	if !strings.Contains(s, "224.2.0.1") || !strings.Contains(s, "5484") || !strings.Contains(s, "H264/90000") || !strings.Contains(s, "packetization-mode=1") {
 		t.Fatal(s)
 	}
 }
@@ -55,19 +55,24 @@ func TestRtpPacketAndAI(t *testing.T) {
 	pkt := make([]byte, 12)
 	pkt[0] = 0x80
 	pkt[1] = 96
-	pt, _, ok := rtpPacket(pkt)
-	if !ok || pt != 96 {
-		t.Fatalf("pt=%d ok=%v", pt, ok)
+	pkt[4], pkt[5], pkt[6], pkt[7] = 0x12, 0x34, 0x56, 0x78
+	pt, ts, _, ok := rtpPacket(pkt)
+	if !ok || pt != 96 || ts != 0x12345678 {
+		t.Fatalf("pt=%d ts=%d ok=%v", pt, ts, ok)
 	}
 	if p := relayPort("e903d3fad593f281"); p < 30000 || p >= 50000 {
 		t.Fatal(p)
 	}
 }
 
-func TestSplitAnnexBNoPanic(t *testing.T) {
-	extractAI(make([]byte, 0x280))
-	splitAnnexB([]byte{0, 0, 1})
-	splitAnnexB([]byte{1, 2, 3, 4})
+func TestH264NALsNoPanic(t *testing.T) {
+	var fu []byte
+	h264NALs(nil, &fu)
+	h264NALs([]byte{1, 2, 3}, &fu)
+	h264NALs([]byte{28}, &fu)
+	if nalAI(nil) != nil || nalAI([]byte{1}) != nil {
+		t.Fatal("non-sei")
+	}
 }
 
 func TestSEIJSON(t *testing.T) {
@@ -76,10 +81,13 @@ func TestSEIJSON(t *testing.T) {
 	sei := []byte{0x06, 5, byte(len(p))}
 	sei = append(sei, p...)
 	sei = append(sei, 0x80)
-	ab := append([]byte{0, 0, 0, 1}, sei...)
-	f := extractAI(ab)
-	if f == nil || f.Results[0].Model != "FaceAnalysis" {
+	f := nalAI(sei)
+	if f == nil || f.Results[0].Model != "FaceAnalysis" || f.Frame.Timestamp != 1 {
 		t.Fatal(f)
+	}
+	var fu []byte
+	if nals := h264NALs(sei, &fu); len(nals) != 1 || nalAI(nals[0]) == nil {
+		t.Fatal("single nal")
 	}
 }
 
@@ -89,18 +97,15 @@ func TestParseAIFrame(t *testing.T) {
 	if f == nil || f.Results[0].Model != "FaceAnalysis" || f.Results[0].Objects[0].Name != "face" {
 		t.Fatal(f)
 	}
-	var buf []byte
-	mid := len(raw) / 2
-	if feedJSON(&buf, raw[:mid]) != nil {
-		t.Fatal("early")
-	}
-	got := feedJSON(&buf, raw[mid:])
-	if got == nil || got.TypeMessage != 6 {
-		t.Fatal(got)
-	}
 	naked := []byte(`"camera":{"id":"x"},"frame":{"timestamp":1},"results":[{"model":"FaceAnalysis","objects":[]}],"type_message":6`)
 	if parseAI(naked) == nil || parseAI(naked).Results[0].Model != "FaceAnalysis" {
 		t.Fatal("wrap")
+	}
+	if parseAI([]byte{0x80, 96, 1, 2, 3}) != nil {
+		t.Fatal("rtp junk")
+	}
+	if _, err := parseAIErr(nil); err == nil {
+		t.Fatal("empty")
 	}
 }
 

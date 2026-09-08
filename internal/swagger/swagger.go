@@ -44,10 +44,10 @@ type streamMeta struct {
 	RTSP    string        `json:"rtsp"`
 	Started bool          `json:"started"`
 	Ready   bool          `json:"ready"`
-	Error    string        `json:"error,omitempty"`
-	Tracks   []streamTrack `json:"tracks,omitempty"`
-	Payloads []int `json:"payloads,omitempty"`
-	AI       any   `json:"ai,omitempty"`
+	Error   string        `json:"error,omitempty"`
+	Tracks  []streamTrack `json:"tracks,omitempty"`
+	RTP     uint32        `json:"rtp,omitempty"`
+	AI      any           `json:"ai,omitempty"`
 }
 
 func spec() []byte {
