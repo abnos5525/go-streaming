@@ -23,7 +23,10 @@ type streamStart struct {
 }
 
 type streamURL struct {
-	URL string `json:"url"`
+	ID      string `json:"id"`
+	URL     string `json:"url"`
+	Play    string `json:"play,omitempty"`
+	Overlay string `json:"overlay,omitempty"`
 }
 
 type streamMsg struct {
@@ -44,6 +47,7 @@ type streamTrack struct {
 }
 
 type streamMeta struct {
+	ID      string        `json:"id"`
 	URL     string        `json:"url"`
 	RTSP    string        `json:"rtsp"`
 	Started bool          `json:"started"`

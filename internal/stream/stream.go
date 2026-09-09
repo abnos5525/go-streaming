@@ -50,6 +50,7 @@ type Track struct {
 }
 
 type Meta struct {
+	ID      string   `json:"id"`
 	URL     string   `json:"url"`
 	RTSP    string   `json:"rtsp"`
 	Started bool     `json:"started"`
@@ -97,7 +98,7 @@ func (s *session) meta() Meta {
 	mu.Lock()
 	defer mu.Unlock()
 	s.delayMS.Store(lag)
-	return Meta{URL: s.playlist(), RTSP: s.url, Started: s.running, Ready: err == nil, Error: s.last, Tracks: s.tracks, RTP: s.rtpTS.Load(), AI: s.delayedAI(lag)}
+	return Meta{ID: s.id, URL: s.playlist(), RTSP: s.url, Started: s.running, Ready: err == nil, Error: s.last, Tracks: s.tracks, RTP: s.rtpTS.Load(), AI: s.delayedAI(lag)}
 }
 
 func sessByID(id string) *session {
