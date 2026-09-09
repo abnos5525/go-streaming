@@ -24,12 +24,18 @@ type Overlay struct {
 
 // OverlayByID returns the delay-compensated AI overlay for a stream.
 // It reuses ByID/Meta so boxes stay in sync with what the viewer sees via HLS.
-func OverlayByID(id string) (Overlay, bool) {
-	m, ok := ByID(id)
-	if !ok {
+func OverlayByID(id string) (Overlay, bool) { return OverlayByIDLag(id, -1) }
+
+// OverlayByIDLag is OverlayByID with an explicit AI delay in ms.
+// lag < 0 means auto (HLS delay); the mp4/MSE lane passes ~700.
+func OverlayByIDLag(id string, lagMS int64) (Overlay, bool) {
+	mu.Lock()
+	s := sessByID(id)
+	mu.Unlock()
+	if s == nil {
 		return Overlay{}, false
 	}
-	return overlayFromMeta(id, m), true
+	return overlayFromMeta(id, s.metaLag(lagMS)), true
 }
 
 func overlayFromMeta(id string, m Meta) Overlay {

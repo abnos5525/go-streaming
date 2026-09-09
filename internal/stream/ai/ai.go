@@ -1,4 +1,6 @@
-package stream
+// Package ai decodes AI metadata frames: standalone JSON, H264 SEI NALs
+// and RTP header extensions. Pure parsing, no IO, no session state.
+package ai
 
 import (
 	"bytes"
@@ -54,19 +56,22 @@ func wrapAI(raw []byte) []byte {
 	return raw
 }
 
-func parseAI(raw []byte) *AIFrame {
+// Parse decodes one AI frame from raw bytes (object or array form).
+// Live feeds send heartbeats with empty results (nothing detected);
+// any envelope carrying a camera id is accepted, not just hits.
+func Parse(raw []byte) *AIFrame {
 	raw = wrapAI(bytes.TrimPrefix(bytes.TrimSpace(raw), []byte{0xef, 0xbb, 0xbf}))
 	if len(raw) == 0 || (raw[0] != '{' && raw[0] != '[') {
 		return nil
 	}
 	var f AIFrame
-	if json.Unmarshal(raw, &f) == nil && len(f.Results) > 0 {
+	if json.Unmarshal(raw, &f) == nil && (len(f.Results) > 0 || f.Camera.ID != "") {
 		return &f
 	}
 	var arr []AIFrame
 	if json.Unmarshal(raw, &arr) == nil {
 		for i := range arr {
-			if len(arr[i].Results) > 0 {
+			if len(arr[i].Results) > 0 || arr[i].Camera.ID != "" {
 				return &arr[i]
 			}
 		}
@@ -74,12 +79,13 @@ func parseAI(raw []byte) *AIFrame {
 	return nil
 }
 
-func parseAIErr(raw []byte) (*AIFrame, error) {
+// ParseErr is Parse with a reasoned error for diagnostics.
+func ParseErr(raw []byte) (*AIFrame, error) {
 	raw = bytes.TrimPrefix(bytes.TrimSpace(raw), []byte{0xef, 0xbb, 0xbf})
 	if len(raw) == 0 {
 		return nil, fmt.Errorf("empty body")
 	}
-	if f := parseAI(raw); f != nil {
+	if f := Parse(raw); f != nil {
 		return f, nil
 	}
 	var dummy any
@@ -121,11 +127,11 @@ func seiU(b []byte, off *int) int {
 }
 
 func tryAI(p []byte) *AIFrame {
-	if f := parseAI(p); f != nil {
+	if f := Parse(p); f != nil {
 		return f
 	}
 	if z := gunzip(p); len(z) > 0 {
-		return parseAI(z)
+		return Parse(z)
 	}
 	return nil
 }
@@ -158,7 +164,8 @@ func seiAI(rbsp []byte) *AIFrame {
 	return nil
 }
 
-func nalAI(nal []byte) *AIFrame {
+// FromNAL extracts an AI frame from one H264 NAL (SEI, type 6).
+func FromNAL(nal []byte) *AIFrame {
 	if len(nal) == 0 || nal[0]&0x1f != 6 {
 		return nil
 	}
@@ -179,4 +186,109 @@ func gunzip(b []byte) []byte {
 		return nil
 	}
 	return out
+}
+
+// FromExt recovers AI JSON from an RTP header extension block (RFC 5285).
+// It tries the whole block, then one-byte / two-byte element walks, then a
+// balanced-JSON scan, so framed or bare metadata is both accepted.
+func FromExt(ext []byte) *AIFrame {
+	if f := tryAI(ext); f != nil {
+		return f
+	}
+	if f := extElems(ext, true); f != nil {
+		return f
+	}
+	if f := extElems(ext, false); f != nil {
+		return f
+	}
+	if j := jsonSlice(ext); j != nil {
+		return tryAI(j)
+	}
+	return nil
+}
+
+func extElems(ext []byte, one bool) *AIFrame {
+	for p := ext; len(p) > 0; {
+		var d []byte
+		if one {
+			if p[0] == 0 {
+				p = p[1:]
+				continue // padding
+			}
+			l := int(p[0]&0x0F) + 1
+			if len(p) < 1+l {
+				return nil
+			}
+			d, p = p[1:1+l], p[1+l:]
+		} else {
+			if len(p) < 2 {
+				return nil
+			}
+			if p[0] == 0 && p[1] == 0 {
+				p = p[2:]
+				continue // padding
+			}
+			l := int(p[1])
+			if len(p) < 2+l {
+				return nil
+			}
+			d, p = p[2:2+l], p[2+l:]
+		}
+		if f := tryAI(d); f != nil {
+			return f
+		}
+		if j := jsonSlice(d); j != nil {
+			if f := tryAI(j); f != nil {
+				return f
+			}
+		}
+	}
+	return nil
+}
+
+// jsonSlice extracts the first balanced {...} or [...] value, honouring
+// strings and escapes, so framed/embedded JSON can be recovered.
+func jsonSlice(b []byte) []byte {
+	s := -1
+	var open, close byte
+	for i, c := range b {
+		if c == '{' || c == '[' {
+			s, open = i, c
+			if c == '{' {
+				close = '}'
+			} else {
+				close = ']'
+			}
+			break
+		}
+	}
+	if s < 0 {
+		return nil
+	}
+	depth, instr, esc := 0, false, false
+	for i := s; i < len(b); i++ {
+		c := b[i]
+		if instr {
+			if esc {
+				esc = false
+			} else if c == '\\' {
+				esc = true
+			} else if c == '"' {
+				instr = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			instr = true
+		case open:
+			depth++
+		case close:
+			depth--
+			if depth == 0 {
+				return b[s : i+1]
+			}
+		}
+	}
+	return nil
 }

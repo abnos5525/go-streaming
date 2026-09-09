@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"testing"
+
+	"project1/internal/stream/ai"
 )
 
 func TestOverlayFromMeta(t *testing.T) {
@@ -11,7 +13,7 @@ func TestOverlayFromMeta(t *testing.T) {
 	if err != nil {
 		t.Skip("no result.json")
 	}
-	var f AIFrame
+	var f ai.AIFrame
 	if err := json.Unmarshal(raw, &f); err != nil {
 		t.Fatal(err)
 	}

@@ -19,7 +19,8 @@ type helloResponse struct {
 }
 
 type streamStart struct {
-	URL string `json:"url" default:"udp://224.2.0.1:5484" example:"udp://224.2.0.1:5484"`
+	URL  string `json:"url" default:"udp://224.2.0.1:5484" example:"udp://224.2.0.1:5484"`
+	Burn bool   `json:"burn,omitempty"`
 }
 
 type streamURL struct {
@@ -37,6 +38,17 @@ type streamID struct {
 	ID string `path:"id"`
 }
 
+type rtcOfferIn struct {
+	ID   string `path:"id"`
+	SDP  string `json:"sdp"`
+	Type string `json:"type"`
+}
+
+type rtcAnswerOut struct {
+	SDP  string `json:"sdp"`
+	Type string `json:"type"`
+}
+
 type streamTrack struct {
 	Type    string `json:"type"`
 	Codec   string `json:"codec"`
@@ -52,10 +64,30 @@ type streamMeta struct {
 	RTSP    string        `json:"rtsp"`
 	Started bool          `json:"started"`
 	Ready   bool          `json:"ready"`
+	Burn    bool          `json:"burn"`
 	Error   string        `json:"error,omitempty"`
 	Tracks  []streamTrack `json:"tracks,omitempty"`
 	RTP     uint32        `json:"rtp,omitempty"`
 	AI      any           `json:"ai,omitempty"`
+	AIAgeMS int64         `json:"ai_age_ms,omitempty"`
+	AIFPS   float64       `json:"ai_fps,omitempty"`
+}
+
+type streamBox struct {
+	X          float64 `json:"x"`
+	Y          float64 `json:"y"`
+	W          float64 `json:"w"`
+	H          float64 `json:"h"`
+	Label      string  `json:"label"`
+	Confidence float64 `json:"confidence,omitempty"`
+}
+
+type streamOverlay struct {
+	ID        string      `json:"id"`
+	Timestamp int64       `json:"timestamp"`
+	Width     int         `json:"width,omitempty"`
+	Height    int         `json:"height,omitempty"`
+	Boxes     []streamBox `json:"boxes"`
 }
 
 func spec() []byte {
@@ -128,6 +160,26 @@ func spec() []byte {
 	sp.AddReqStructure(new(streamStart))
 	sp.AddRespStructure(new(streamMsg), func(cu *openapi.ContentUnit) { cu.HTTPStatus = http.StatusOK })
 	if err := r.AddOperation(sp); err != nil {
+		panic(err)
+	}
+	ov, err := r.NewOperationContext(http.MethodGet, "/stream/overlay/{id}")
+	if err != nil {
+		panic(err)
+	}
+	ov.SetSummary("Delay-compensated AI boxes for drawing")
+	ov.AddReqStructure(new(streamID))
+	ov.AddRespStructure(new(streamOverlay), func(cu *openapi.ContentUnit) { cu.HTTPStatus = http.StatusOK })
+	if err := r.AddOperation(ov); err != nil {
+		panic(err)
+	}
+	rtc, err := r.NewOperationContext(http.MethodPost, "/webrtc/{id}/offer")
+	if err != nil {
+		panic(err)
+	}
+	rtc.SetSummary("WebRTC viewer handshake (non-trickle offer/answer)")
+	rtc.AddReqStructure(new(rtcOfferIn))
+	rtc.AddRespStructure(new(rtcAnswerOut), func(cu *openapi.ContentUnit) { cu.HTTPStatus = http.StatusOK })
+	if err := r.AddOperation(rtc); err != nil {
 		panic(err)
 	}
 	b, err := json.Marshal(r.Spec)

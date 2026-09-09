@@ -1,9 +1,15 @@
 package stream
 
 import (
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"project1/internal/stream/ai"
+	"project1/internal/stream/rtp"
 )
 
 func TestStopNotRunning(t *testing.T) {
@@ -41,72 +47,59 @@ func TestFFmpegInputMulticast(t *testing.T) {
 	}
 }
 
-func TestRtpSDP(t *testing.T) {
-	u := multicastURL("udp://224.2.0.1:5484")
-	if u == nil {
-		t.Fatal("nil")
+func TestLearnParams(t *testing.T) {
+	id := "ccccccccccccccccdd"
+	if err := os.MkdirAll(filepath.Join(dir, id), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	s := rtpSDP(u)
-	if !strings.Contains(s, "224.2.0.1") || !strings.Contains(s, "5484") || !strings.Contains(s, "H264/90000") || !strings.Contains(s, "packetization-mode=1") {
-		t.Fatal(s)
+	defer os.RemoveAll(filepath.Join(dir, id))
+	// Relay SDP exists without params (as loop() writes it).
+	if err := os.WriteFile(filepath.Join(dir, id, "in.sdp"), []byte(rtp.SDP(mustURL(t, "rtp://127.0.0.1:30000"), "", "")), 0o644); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestRtpPacketAndAI(t *testing.T) {
-	pkt := make([]byte, 12)
-	pkt[0] = 0x80
-	pkt[1] = 96
-	pkt[4], pkt[5], pkt[6], pkt[7] = 0x12, 0x34, 0x56, 0x78
-	pt, ts, _, ok := rtpPacket(pkt)
-	if !ok || pt != 96 || ts != 0x12345678 {
-		t.Fatalf("pt=%d ts=%d ok=%v", pt, ts, ok)
+	s := &session{id: id}
+	sps, pps := []byte{0x67, 0x4D, 0x00, 0x1E}, []byte{0x68, 0xEE, 0x3C}
+	// Single NALs.
+	s.learnParams([][]byte{sps, pps})
+	if s.spsB64 == "" || s.ppsB64 == "" {
+		t.Fatal("params not learned")
 	}
-	if p := relayPort("e903d3fad593f281"); p < 30000 || p >= 50000 {
-		t.Fatal(p)
+	b, _ := os.ReadFile(filepath.Join(dir, id, "in.sdp"))
+	if !strings.Contains(string(b), "sprop-parameter-sets="+s.spsB64+","+s.ppsB64) {
+		t.Fatalf("sdp not stamped: %s", b)
 	}
-}
-
-func TestH264NALsNoPanic(t *testing.T) {
-	var fu []byte
-	h264NALs(nil, &fu)
-	h264NALs([]byte{1, 2, 3}, &fu)
-	h264NALs([]byte{28}, &fu)
-	if nalAI(nil) != nil || nalAI([]byte{1}) != nil {
-		t.Fatal("non-sei")
+	// STAP-A aggregation also yields params on a fresh session.
+	s2 := &session{id: id}
+	aggr := []byte{24}
+	add := func(n []byte) {
+		aggr = append(aggr, byte(len(n)>>8), byte(len(n)))
+		aggr = append(aggr, n...)
 	}
-}
-
-func TestSEIJSON(t *testing.T) {
-	js := []byte(`{"camera":{"id":"x"},"frame":{"timestamp":1},"results":[{"model":"FaceAnalysis","objects":[]}],"type_message":6}`)
-	p := append(make([]byte, 16), js...)
-	sei := []byte{0x06, 5, byte(len(p))}
-	sei = append(sei, p...)
-	sei = append(sei, 0x80)
-	f := nalAI(sei)
-	if f == nil || f.Results[0].Model != "FaceAnalysis" || f.Frame.Timestamp != 1 {
-		t.Fatal(f)
-	}
-	var fu []byte
-	if nals := h264NALs(sei, &fu); len(nals) != 1 || nalAI(nals[0]) == nil {
-		t.Fatal("single nal")
+	add(sps)
+	add(pps)
+	add([]byte{0x65, 0x01, 0x02})
+	s2.learnParams([][]byte{aggr})
+	if s2.spsB64 == "" || s2.ppsB64 == "" {
+		t.Fatal("stap-a params not learned")
 	}
 }
 
-func TestParseAIFrame(t *testing.T) {
-	raw := []byte(`{"camera":{"id":"x"},"frame":{"timestamp":1},"results":[{"model":"FaceAnalysis","objects":[{"bbox":{"x":50,"y":50,"width":100,"height":100},"confidence":0.8,"object_type_name":"face"}]}],"type_message":6}`)
-	f := parseAI(raw)
-	if f == nil || f.Results[0].Model != "FaceAnalysis" || f.Results[0].Objects[0].Name != "face" {
-		t.Fatal(f)
+func mustURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
 	}
-	naked := []byte(`"camera":{"id":"x"},"frame":{"timestamp":1},"results":[{"model":"FaceAnalysis","objects":[]}],"type_message":6`)
-	if parseAI(naked) == nil || parseAI(naked).Results[0].Model != "FaceAnalysis" {
-		t.Fatal("wrap")
+	return u
+}
+
+func TestTailErr(t *testing.T) {
+	if tailErr("") != "" || tailErr("  x  ") != "x" {
+		t.Fatal("trim broken")
 	}
-	if parseAI([]byte{0x80, 96, 1, 2, 3}) != nil {
-		t.Fatal("rtp junk")
-	}
-	if _, err := parseAIErr(nil); err == nil {
-		t.Fatal("empty")
+	long := strings.Repeat("z", 3000)
+	if got := tailErr(long); len(got) != 1000+len("…[truncated] ") || !strings.HasSuffix(got, strings.Repeat("z", 1000)) {
+		t.Fatalf("tail wrong len %d", len(got))
 	}
 }
 
@@ -124,22 +117,23 @@ func TestDelayedAI(t *testing.T) {
 	s := &session{}
 	base := int64(1_788_870_540_661)
 	for i := 0; i <= 10; i++ {
-		f := &AIFrame{}
+		f := &ai.AIFrame{}
 		f.Frame.Timestamp = base + int64(i)*1000
-		s.pushAI(f)
+		s.pushAI(f, 990000+int64(i)*1000)
 	}
-	got := s.delayedAI(8000)
+	// Hold semantics: newest frame held ≥ delay wins.
+	got := s.delayedAIAt(8000, 1000000)
 	if got == nil || got.Frame.Timestamp != base+2000 {
-		t.Fatalf("want live-8s (%d), got %v", base+2000, got)
+		t.Fatalf("want held-8s (%d), got %v", base+2000, got)
 	}
-	if got := s.delayedAI(3000); got == nil || got.Frame.Timestamp != base+7000 {
-		t.Fatalf("want live-3s, got %v", got)
+	if got := s.delayedAIAt(3000, 1000000); got == nil || got.Frame.Timestamp != base+7000 {
+		t.Fatalf("want held-3s, got %v", got)
 	}
-	same := &AIFrame{}
+	same := &ai.AIFrame{}
 	same.Frame.Timestamp = base + 10000
 	same.TypeMessage = 6
-	s.pushAI(same)
-	if s.buf[len(s.buf)-1].TypeMessage != 6 {
+	s.pushAI(same, 1000500)
+	if s.buf[len(s.buf)-1].TypeMessage != 6 || s.arr[len(s.arr)-1] != 1000500 {
 		t.Fatal("same timestamp not replaced")
 	}
 }
@@ -149,13 +143,153 @@ func TestPlaylistLagMS(t *testing.T) {
 	if len(durs) != 4 || len(files) != 4 || files[3] != "d.ts" {
 		t.Fatalf("parse %v %v", durs, files)
 	}
-	now := time.Unix(1_700_000_010, 0)
-	newest := now.Add(-400 * time.Millisecond)
-	got := playlistLagMS(durs, newest, now)
-	if got != 6400 {
-		t.Fatalf("want 6400 (6s+0.4s), got %d", got)
+	// Player sits liveSyncDurationCount (2) behind the edge: last 2+1.5 = 3.5s.
+	if got := playlistLagMS(durs); got != 3500 {
+		t.Fatalf("want 3500, got %d", got)
 	}
-	if playlistLagMS(durs, time.Time{}, now) != 7500 {
-		t.Fatalf("sum without mtime: %d", playlistLagMS(durs, time.Time{}, now))
+	if got := playlistLagMS(durs[:1]); got != 2000 {
+		t.Fatalf("startup 1 seg: want 2000, got %d", got)
+	}
+	if got := playlistLagMS(nil); got != 0 {
+		t.Fatalf("empty: want 0, got %d", got)
+	}
+	if got := playlistLagMS(durs[:2]); got != 4000 {
+		t.Fatalf("startup 2 segs: want 4000, got %d", got)
+	}
+}
+
+func TestDelayedAISkewProof(t *testing.T) {
+	now := time.Now().UnixMilli()
+	s := &session{}
+	// Camera clock in a foreign epoch; arrivals ride the server clock.
+	// Hold picks by arrival age, so skew cannot shift boxes.
+	for i := 0; i <= 10; i++ {
+		f := &ai.AIFrame{}
+		f.Frame.Timestamp = 5_000_000_000 + int64(i)*1000
+		s.pushAI(f, now-10000+int64(i)*1000)
+	}
+	got := s.delayedAIAt(6000, now)
+	if got == nil || got.Frame.Timestamp != 5_000_004_000 {
+		t.Fatalf("skew shifted pick: %+v", got)
+	}
+}
+
+func TestDelayedAILaggingFeed(t *testing.T) {
+	now := time.Now().UnixMilli()
+	s := &session{}
+	// Feed 3s behind (ts = arrival - 3000): only frames held ≥ delay may show.
+	for i := 0; i <= 10; i++ {
+		f := &ai.AIFrame{}
+		f.Frame.Timestamp = now - 13000 + int64(i)*1000
+		s.pushAI(f, now-10000+int64(i)*1000)
+	}
+	got := s.delayedAIAt(6000, now)
+	if got == nil || got.Frame.Timestamp != now-9000 {
+		t.Fatalf("want causally-held %d, got %v", now-9000, got)
+	}
+}
+
+func TestDelayedAIOffset(t *testing.T) {
+	t.Setenv("AI_OFFSET_MS", "2000")
+	now := time.Now().UnixMilli()
+	s := &session{}
+	for i := 0; i <= 12; i++ {
+		f := &ai.AIFrame{}
+		f.Frame.Timestamp = now - 12000 + int64(i)*1000
+		s.pushAI(f, now-12000+int64(i)*1000)
+	}
+	got := s.delayedAIAt(6000, now)
+	if got == nil || got.Frame.Timestamp != now-8000 {
+		t.Fatalf("want offset-adjusted %d, got %v", now-8000, got)
+	}
+}
+
+func TestLowLatencyDefaults(t *testing.T) {
+	t.Setenv("HLS_TIME", "")
+	t.Setenv("HLS_LIST_SIZE", "")
+	if hlsSegTime() != 1 || hlsSegList() != 4 || aiDelayMS() != 4000 {
+		t.Fatalf("want 1s x 4 = 4000ms, got %g x %d = %d", hlsSegTime(), hlsSegList(), aiDelayMS())
+	}
+	s := strings.Join(ffmpegCmd("in", "out", 23456).Args, " ")
+	for _, want := range []string{"nobuffer", "low_delay", "-hls_time", "1", "-hls_list_size", "4", "independent_segments"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("ffmpeg cmd missing %q: %s", want, s)
+		}
+	}
+	b := strings.Join(ffmpegBurnCmd("in", "out", 23456).Args, " ")
+	if !strings.Contains(b, "force_key_frames") {
+		t.Fatalf("burn cmd must force keyframes: %s", b)
+	}
+}
+
+func TestLaneLagFresh(t *testing.T) {
+	id := "dddddddddddddddd"
+	if err := os.MkdirAll(filepath.Join(dir, id), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(filepath.Join(dir, id))
+	pl := "#EXTM3U\n#EXTINF:1.0,\na.ts\n#EXTINF:1.0,\nb.ts\n#EXTINF:1.0,\nc.ts\n"
+	if err := os.WriteFile(filepath.Join(dir, id, "index.m3u8"), []byte(pl), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := (&session{id: id}).laneLag(); got != 2000 {
+		t.Fatalf("copy lane: want 2000, got %d", got)
+	}
+	if got := (&session{id: id, burn: true}).laneLag(); got != 2400 {
+		t.Fatalf("burn lane: want 2400, got %d", got)
+	}
+}
+
+func TestAIFPSAge(t *testing.T) {
+	if fpsOf(nil) != 0 || fpsOf([]int64{5}) != 0 || fpsOf([]int64{0, 0}) != 0 {
+		t.Fatal("fps guards")
+	}
+	if f := fpsOf([]int64{1000, 2000, 3000}); f != 1.0 {
+		t.Fatalf("want 1fps, got %v", f)
+	}
+	now := time.Now().UnixMilli()
+	s := &session{id: "eeeeeeeeeeeeeeee"}
+	for i := 0; i < 5; i++ {
+		f := &ai.AIFrame{}
+		f.Frame.Timestamp = now - 4000 + int64(i)*1000
+		s.pushAI(f, now-4000+int64(i)*1000)
+	}
+	m := s.metaLag(700)
+	if m.AIFPS != 1.0 {
+		t.Fatalf("want ai_fps 1, got %v", m.AIFPS)
+	}
+	if m.AIAgeMS < 0 || m.AIAgeMS > 60000 {
+		t.Fatalf("ai_age out of range: %d", m.AIAgeMS)
+	}
+	if m.AI == nil || m.AI.Frame.Timestamp != now-1000 {
+		t.Fatalf("explicit lag pick broken: %+v", m.AI)
+	}
+}
+
+// TestHoldMotionSim drives a synthetic gliding object (100px/s, AI at 2Hz
+// in-band) through the burn-lane hold and proves the shown box trails the
+// displayed video by less than one AI interval, then glides the rest.
+func TestHoldMotionSim(t *testing.T) {
+	s := &session{}
+	base := int64(1_000_000)
+	for i := 0; i < 10; i++ {
+		ts := base + int64(i)*500
+		f := &ai.AIFrame{}
+		f.Frame.Timestamp = ts
+		f.Results = []ai.AIResult{{Objects: []ai.AIObject{{
+			BBox: ai.BBox{X: float64(ts-base) / 10, Y: 0, Width: 10, Height: 10}, Name: "person",
+		}}}}
+		s.pushAI(f, ts+50) // LAN arrival ~ capture
+	}
+	now := base + 9*500 + 50
+	got := s.delayedAIAt(2400, now) // 2s HLS depth + 400ms encode
+	if got == nil || got.Frame.Timestamp != base+2000 {
+		t.Fatalf("hold missed: %+v", got)
+	}
+	// Displayed capture is now-2400 = base+2150 -> object at x=215;
+	// shown box x=200: 15px stale, inside one AI interval.
+	shown := got.Results[0].Objects[0].BBox.X
+	if d := float64(base+2150-base)/10 - shown; d < 0 || d > 50 {
+		t.Fatalf("box trails by %.0fpx, want 0..50", d)
 	}
 }
