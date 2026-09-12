@@ -19,14 +19,17 @@ type helloResponse struct {
 }
 
 type streamStart struct {
-	URL string `json:"url" default:"udp://224.2.0.1:5484" example:"udp://224.2.0.1:5484"`
+	URL        string `json:"url" default:"udp://224.2.0.1:5484" example:"udp://224.2.0.1:5484"`
+	OutputType int    `json:"output_type" example:"6"`
 }
 
 type streamURL struct {
-	ID      string `json:"id"`
-	URL     string `json:"url"`
-	Play    string `json:"play,omitempty"`
-	Overlay string `json:"overlay,omitempty"`
+	URL        string `json:"url"`
+	OutputType int    `json:"output_type"`
+}
+
+type streamStop struct {
+	URL string `json:"url" default:"udp://224.2.0.1:5484" example:"udp://224.2.0.1:5484"`
 }
 
 type streamMsg struct {
@@ -144,7 +147,7 @@ func spec() []byte {
 	if err != nil {
 		panic(err)
 	}
-	st.SetSummary("Start RTSP to HLS")
+	st.SetSummary("Start ingest; output_type 6 = HLS, 7 = WebRTC")
 	st.AddReqStructure(new(streamStart))
 	st.AddRespStructure(new(streamURL), func(cu *openapi.ContentUnit) { cu.HTTPStatus = http.StatusOK })
 	if err := r.AddOperation(st); err != nil {
@@ -155,7 +158,7 @@ func spec() []byte {
 		panic(err)
 	}
 	sp.SetSummary("Stop RTSP to HLS")
-	sp.AddReqStructure(new(streamStart))
+	sp.AddReqStructure(new(streamStop))
 	sp.AddRespStructure(new(streamMsg), func(cu *openapi.ContentUnit) { cu.HTTPStatus = http.StatusOK })
 	if err := r.AddOperation(sp); err != nil {
 		panic(err)

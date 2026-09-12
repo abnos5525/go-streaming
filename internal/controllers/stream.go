@@ -218,9 +218,14 @@ func registerStream(r *gin.Engine) {
 	})
 	r.POST("/stream/start", func(c *gin.Context) {
 		var req struct {
-			URL string `json:"url"`
+			URL        string `json:"url"`
+			OutputType int    `json:"output_type"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil && c.Request.ContentLength != 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"message": err.Error()})
+			return
+		}
+		if _, err := outPath("x", req.OutputType); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"message": err.Error()})
 			return
 		}
@@ -229,16 +234,8 @@ func registerStream(r *gin.Engine) {
 			c.JSON(http.StatusBadRequest, gin.H{"message": err.Error()})
 			return
 		}
-		// m already carries delay-compensated AI + probed tracks metadata.
-		c.JSON(http.StatusOK, gin.H{
-			"id":      m.ID,
-			"url":     absURL(c, m.URL),
-			"play":    absURL(c, "/play/"+m.ID),
-			"live":    absURL(c, "/live/"+m.ID),
-			"rtc":     absURL(c, "/webrtc/"+m.ID+"/offer"),
-			"overlay": absURL(c, "/stream/overlay/"+m.ID),
-			"meta":    m,
-		})
+		path, _ := outPath(m.ID, req.OutputType)
+		c.JSON(http.StatusOK, gin.H{"url": absURL(c, path), "output_type": req.OutputType})
 	})
 	r.POST("/stream/stop", func(c *gin.Context) {
 		var req struct {
@@ -251,6 +248,18 @@ func registerStream(r *gin.Engine) {
 		}
 		c.JSON(http.StatusOK, gin.H{"message": "stopped"})
 	})
+}
+
+// outPath is the single output the client asked for: 6 = HLS playlist, 7 = WebRTC offer.
+func outPath(id string, outputType int) (string, error) {
+	switch outputType {
+	case 6:
+		return "/hls/" + id + "/index.m3u8", nil
+	case 7:
+		return "/webrtc/" + id + "/offer", nil
+	default:
+		return "", fmt.Errorf("output_type must be 6 or 7")
+	}
 }
 
 func absURL(c *gin.Context, path string) string {
