@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"project1/internal/stream/ai"
+	"project1/internal/stream/algo"
 	"project1/internal/stream/rtp"
 )
 
@@ -436,91 +437,11 @@ func aiOffsetMS() int64 {
 	return v
 }
 
-// delayedAIAt picks the AI frame that describes the picture currently on
-// screen. The player is delayMS behind live; the newest camera timestamp
-// is "live", so the match is newest Frame.Timestamp ≤ latest − delay − offset.
-// Clocks are never mixed with wall time, so sender skew cannot shift boxes.
-// delayMS == 0 is live (latest frame). delayMS < 0 falls back to aiDelayMS.
-// Missing timestamps fall back to arrival age. Startup with nothing old
-// enough returns the oldest buffered frame instead of nothing.
 func (s *session) delayedAIAt(delayMS, nowMS int64) *ai.AIFrame {
-	if len(s.buf) == 0 {
-		return nil
-	}
 	if delayMS < 0 {
 		delayMS = aiDelayMS()
 	}
-	off := aiOffsetMS()
-	if delayMS == 0 {
-		return s.buf[len(s.buf)-1]
-	}
-	if latest := s.buf[len(s.buf)-1].Frame.Timestamp; latest > 0 {
-		target := latest - delayMS - off
-		var best *ai.AIFrame
-		for _, f := range s.buf {
-			if f.Frame.Timestamp <= target {
-				best = f
-			}
-		}
-		if best != nil {
-			return best
-		}
-		return s.buf[0]
-	}
-	target := nowMS - delayMS - off
-	var best *ai.AIFrame
-	for i := range s.buf {
-		if i < len(s.arr) && s.arr[i] <= target {
-			best = s.buf[i]
-		}
-	}
-	if best != nil {
-		return best
-	}
-	return s.buf[0]
-}
-
-func parseEXTINF(b []byte) (durs []float64, files []string) {
-	lines := strings.Split(string(b), "\n")
-	for i := 0; i < len(lines); i++ {
-		line := strings.TrimSpace(lines[i])
-		if !strings.HasPrefix(line, "#EXTINF:") {
-			continue
-		}
-		rest := strings.TrimPrefix(line, "#EXTINF:")
-		rest, _, _ = strings.Cut(rest, ",")
-		d, err := strconv.ParseFloat(strings.TrimSpace(rest), 64)
-		if err != nil || d <= 0 {
-			continue
-		}
-		durs = append(durs, d)
-		if i+1 < len(lines) {
-			n := strings.TrimSpace(lines[i+1])
-			if n != "" && !strings.HasPrefix(n, "#") {
-				files = append(files, n)
-			}
-		}
-	}
-	return durs, files
-}
-
-// playlistLagMS estimates how far behind live the player renders.
-// hls.js plays liveSyncDurationCount (2, see playPage) behind the edge,
-// so sum the last ≤2 durations. Summing more overestimates and makes boxes
-// trail motion by the excess on every frame.
-func playlistLagMS(durs []float64) int64 {
-	n := len(durs)
-	if n == 0 {
-		return 0
-	}
-	if n > 2 {
-		durs = durs[n-2:]
-	}
-	var sum float64
-	for _, d := range durs {
-		sum += d
-	}
-	return int64(sum * 1000)
+	return algo.Hold(s.buf, s.arr, delayMS, nowMS, aiOffsetMS())
 }
 
 func (s *session) hlsLagMS() int64 {
@@ -531,8 +452,8 @@ func (s *session) hlsLagMS() int64 {
 		}
 		return aiDelayMS()
 	}
-	durs, _ := parseEXTINF(b)
-	if ms := playlistLagMS(durs); ms > 0 {
+	durs, _ := algo.ParseEXTINF(b)
+	if ms := algo.PlaylistLagMS(durs); ms > 0 {
 		// GOP too long for the requested segment: copy can't cut
 		// without a keyframe, so the playlist holds many seconds.
 		// Warn once per session so operator can shorten camera GOP.
