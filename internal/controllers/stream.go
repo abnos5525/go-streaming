@@ -77,33 +77,47 @@ setInterval(fetchOv, 100); fetchOv(); requestAnimationFrame(drawBoxes);
 }
 `
 
+const playerCSS = `body{margin:0;background:#000;color:#0f0;font:12px sans-serif}.wrap{position:relative}video{width:100%;display:block;background:#000}canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}.tag{position:absolute;top:8px;left:8px;background:#0f0;color:#000;padding:2px 6px}`
+
 func playPage(id string) string {
 	src := "/hls/" + id + "/index.m3u8"
 	overlay := "/stream/overlay/" + id
-	rtcOffer := "/webrtc/" + id + "/offer"
 	return `<!doctype html>
 <meta charset="utf-8">
-<style>body{margin:0;background:#000;color:#0f0;font:12px sans-serif}.row{display:flex;gap:8px;padding:8px}.col{flex:1;min-width:0;position:relative}.wrap{position:relative}video{width:100%;display:block;background:#000}canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}.tag{position:absolute;top:8px;left:8px;background:#0f0;color:#000;padding:2px 6px}</style>
-<div class="row">
-<div class="col"><div class="wrap"><video id="v" autoplay playsinline muted controls></video><canvas id="o"></canvas><div class="tag">HLS</div></div></div>
-<div class="col"><div class="wrap"><video id="v2" autoplay playsinline muted></video><canvas id="o2"></canvas><div class="tag" id="s2">WEBRTC</div></div></div>
-</div>
+<style>` + playerCSS + `</style>
+<div class="wrap"><video id="v" autoplay playsinline muted controls></video><canvas id="o"></canvas><div class="tag">HLS</div></div>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
 <script>
-const s2 = document.getElementById('s2');
-const src = '` + src + `', rtcURL = '` + rtcOffer + `';
+const src = '` + src + `';
 const v = document.getElementById('v');
 let hlsPlayer = null;
 if (window.Hls && Hls.isSupported()) { hlsPlayer = new Hls({lowLatencyMode: true, liveSyncDurationCount: 2, liveMaxLatencyDurationCount: 4, maxBufferLength: 2, maxLiveSyncPlaybackRate: 1.5}); hlsPlayer.loadSource(src); hlsPlayer.attachMedia(v); }
 else if (v.canPlayType('application/vnd.apple.mpegurl')) { v.src = src; }
+</script>
+<script>
+` + trackerJS + `
+startTracker('v', 'o', '` + overlay + `', () => playerLagMS(v, hlsPlayer));
+</script>`
+}
+
+func rtcPage(id string) string {
+	overlay := "/stream/overlay/" + id
+	rtcOffer := "/webrtc/" + id + "/offer"
+	return `<!doctype html>
+<meta charset="utf-8">
+<style>` + playerCSS + `</style>
+<div class="wrap"><video id="v" autoplay playsinline muted></video><canvas id="o"></canvas><div class="tag" id="s">WEBRTC</div></div>
+<script>
+const s = document.getElementById('s');
+const rtcURL = '` + rtcOffer + `';
+const v = document.getElementById('v');
 async function startRTC() {
-  const v2 = document.getElementById('v2');
   let pc = null;
   for (;;) {
     try {
-      s2.textContent = 'WEBRTC';
+      s.textContent = 'WEBRTC';
       pc = new RTCPeerConnection();
-      pc.ontrack = e => { v2.srcObject = e.streams[0]; };
+      pc.ontrack = e => { v.srcObject = e.streams[0]; };
       pc.addTransceiver('video', {direction: 'recvonly'});
       await pc.setLocalDescription(await pc.createOffer());
       await new Promise(res => {
@@ -124,7 +138,7 @@ async function startRTC() {
         };
         pc.addEventListener('connectionstatechange', h); h();
       });
-      s2.textContent = 'WEBRTC LIVE';
+      s.textContent = 'WEBRTC LIVE';
       await new Promise((res, rej) => {
         pc.addEventListener('connectionstatechange', function f() {
           if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected' || pc.connectionState === 'closed') {
@@ -135,7 +149,7 @@ async function startRTC() {
     } catch (e) {
       try { if (pc) pc.close(); } catch (_) {}
       pc = null;
-      s2.textContent = 'WEBRTC RECONNECTING';
+      s.textContent = 'WEBRTC RECONNECTING';
       await new Promise(r => setTimeout(r, 2000));
     }
   }
@@ -144,8 +158,7 @@ startRTC();
 </script>
 <script>
 ` + trackerJS + `
-startTracker('v', 'o', '` + overlay + `', () => playerLagMS(v, hlsPlayer));
-startTracker('v2', 'o2', '` + overlay + `', () => playerLagMS(document.getElementById('v2')) ?? 100);
+startTracker('v', 'o', '` + overlay + `', () => playerLagMS(v) ?? 100);
 </script>`
 }
 
@@ -193,6 +206,14 @@ func registerStream(r *gin.Engine) {
 			return
 		}
 		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(livePage(id)))
+	})
+	r.GET("/webrtc/:id/offer", func(c *gin.Context) {
+		id := c.Param("id")
+		if !stream.ValidID(id) {
+			c.JSON(http.StatusNotFound, gin.H{"message": "unknown stream"})
+			return
+		}
+		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(rtcPage(id)))
 	})
 	r.POST("/webrtc/:id/offer", func(c *gin.Context) {
 		var offer rtcOffer

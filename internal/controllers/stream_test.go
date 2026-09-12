@@ -1,6 +1,21 @@
 package controllers
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+func TestPlayerPagesAreSingleLane(t *testing.T) {
+	id := "e903d3fad593f281"
+	hls := playPage(id)
+	if strings.Count(hls, "<video") != 1 || strings.Contains(hls, "startRTC") || strings.Contains(hls, "v2") {
+		t.Fatal("play page must be HLS only")
+	}
+	rtc := rtcPage(id)
+	if strings.Count(rtc, "<video") != 1 || strings.Contains(rtc, "hls.js") || strings.Contains(rtc, "index.m3u8") {
+		t.Fatal("webrtc page must be WebRTC only")
+	}
+}
 
 func TestOutPath(t *testing.T) {
 	id := "e903d3fad593f281"
