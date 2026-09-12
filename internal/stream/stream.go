@@ -65,6 +65,7 @@ type session struct {
 	delayMS       atomic.Int64
 	buf           []*ai.AIFrame
 	arr           []int64 // server arrival ms per buf entry (same order)
+	out           int     // 6 = HLS, 7 = WebRTC; first start wins
 }
 
 type Track struct {
@@ -77,17 +78,18 @@ type Track struct {
 }
 
 type Meta struct {
-	ID      string      `json:"id"`
-	URL     string      `json:"url"`
-	RTSP    string      `json:"rtsp"`
-	Started bool        `json:"started"`
-	Ready   bool        `json:"ready"`
-	Error   string      `json:"error,omitempty"`
-	Tracks  []Track     `json:"tracks,omitempty"`
-	RTP     uint32      `json:"rtp,omitempty"`
-	AI      *ai.AIFrame `json:"ai,omitempty"`
-	AIAgeMS int64       `json:"ai_age_ms,omitempty"`
-	AIFPS   float64     `json:"ai_fps,omitempty"`
+	ID         string      `json:"id"`
+	URL        string      `json:"url"`
+	RTSP       string      `json:"rtsp"`
+	Started    bool        `json:"started"`
+	Ready      bool        `json:"ready"`
+	Error      string      `json:"error,omitempty"`
+	Tracks     []Track     `json:"tracks,omitempty"`
+	RTP        uint32      `json:"rtp,omitempty"`
+	AI         *ai.AIFrame `json:"ai,omitempty"`
+	AIAgeMS    int64       `json:"ai_age_ms,omitempty"`
+	AIFPS      float64     `json:"ai_fps,omitempty"`
+	OutputType int         `json:"output_type,omitempty"`
 }
 
 var (
@@ -155,7 +157,7 @@ func (s *session) metaLag(want int64) Meta {
 			age = 0
 		}
 	}
-	return Meta{ID: s.id, URL: s.playlist(), RTSP: s.url, Started: s.running, Ready: err == nil, Error: s.last, Tracks: s.tracks, RTP: s.rtpTS.Load(), AI: s.delayedAI(lag), AIAgeMS: age, AIFPS: fpsOf(s.arr)}
+	return Meta{ID: s.id, URL: s.playlist(), RTSP: s.url, Started: s.running, Ready: err == nil, Error: s.last, Tracks: s.tracks, RTP: s.rtpTS.Load(), AI: s.delayedAI(lag), AIAgeMS: age, AIFPS: fpsOf(s.arr), OutputType: s.out}
 }
 
 func sessByID(id string) *session {
@@ -197,7 +199,7 @@ func resolve(url string) (string, error) {
 	}
 }
 
-func Start(url string) (Meta, error) {
+func Start(url string, outputType int) (Meta, error) {
 	url, err := resolve(url)
 	if err != nil {
 		return Meta{}, err
@@ -207,7 +209,7 @@ func Start(url string) (Meta, error) {
 		mu.Unlock()
 		return s.meta(), nil
 	}
-	s := &session{url: url, id: idFor(url), running: true, gen: 1}
+	s := &session{url: url, id: idFor(url), running: true, gen: 1, out: outputType}
 	s.delayMS.Store(aiDelayMS())
 	if hub, err := newRTCHub(); err != nil {
 		mu.Unlock()

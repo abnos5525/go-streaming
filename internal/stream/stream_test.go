@@ -241,6 +241,13 @@ func TestLowLatencyDefaults(t *testing.T) {
 	}
 }
 
+func TestMetaOutputType(t *testing.T) {
+	s := &session{id: "ffffffffffffffff", out: 7, running: true}
+	if s.metaLag(0).OutputType != 7 {
+		t.Fatal("want output_type 7 on meta")
+	}
+}
+
 func TestLaneLagFresh(t *testing.T) {
 	id := "dddddddddddddddd"
 	if err := os.MkdirAll(filepath.Join(dir, id), 0o755); err != nil {

@@ -7,13 +7,13 @@ import (
 
 func TestPlayerPagesAreSingleLane(t *testing.T) {
 	id := "e903d3fad593f281"
-	hls := playPage(id)
+	hls := watchPage(id, 6)
 	if strings.Count(hls, "<video") != 1 || strings.Contains(hls, "startRTC") || strings.Contains(hls, "v2") {
-		t.Fatal("play page must be HLS only")
+		t.Fatal("output_type 6 must be HLS only")
 	}
-	rtc := rtcPage(id)
+	rtc := watchPage(id, 7)
 	if strings.Count(rtc, "<video") != 1 || strings.Contains(rtc, "hls.js") || strings.Contains(rtc, "index.m3u8") {
-		t.Fatal("webrtc page must be WebRTC only")
+		t.Fatal("output_type 7 must be WebRTC only")
 	}
 }
 

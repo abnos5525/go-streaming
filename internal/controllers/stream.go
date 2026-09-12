@@ -79,6 +79,13 @@ setInterval(fetchOv, 100); fetchOv(); requestAnimationFrame(drawBoxes);
 
 const playerCSS = `body{margin:0;background:#000;color:#0f0;font:12px sans-serif}.wrap{position:relative}video{width:100%;display:block;background:#000}canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}.tag{position:absolute;top:8px;left:8px;background:#0f0;color:#000;padding:2px 6px}`
 
+func watchPage(id string, outputType int) string {
+	if outputType == 7 {
+		return rtcPage(id)
+	}
+	return playPage(id)
+}
+
 func playPage(id string) string {
 	src := "/hls/" + id + "/index.m3u8"
 	overlay := "/stream/overlay/" + id
@@ -166,11 +173,12 @@ func registerStream(r *gin.Engine) {
 	r.GET("/hls/:id/:file", serveHLS)
 	r.GET("/play/:id", func(c *gin.Context) {
 		id := c.Param("id")
-		if !stream.ValidID(id) {
+		m, ok := stream.ByID(id)
+		if !ok {
 			c.JSON(http.StatusNotFound, gin.H{"message": "unknown stream"})
 			return
 		}
-		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(playPage(id)))
+		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(watchPage(id, m.OutputType)))
 	})
 	r.GET("/stream/meta", func(c *gin.Context) {
 		c.JSON(http.StatusOK, stream.Status())
@@ -250,7 +258,7 @@ func registerStream(r *gin.Engine) {
 			c.JSON(http.StatusBadRequest, gin.H{"message": err.Error()})
 			return
 		}
-		m, err := stream.Start(req.URL)
+		m, err := stream.Start(req.URL, req.OutputType)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"message": err.Error()})
 			return

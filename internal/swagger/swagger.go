@@ -61,17 +61,18 @@ type streamTrack struct {
 }
 
 type streamMeta struct {
-	ID      string        `json:"id"`
-	URL     string        `json:"url"`
-	RTSP    string        `json:"rtsp"`
-	Started bool          `json:"started"`
-	Ready   bool          `json:"ready"`
-	Error   string        `json:"error,omitempty"`
-	Tracks  []streamTrack `json:"tracks,omitempty"`
-	RTP     uint32        `json:"rtp,omitempty"`
-	AI      any           `json:"ai,omitempty"`
-	AIAgeMS int64         `json:"ai_age_ms,omitempty"`
-	AIFPS   float64       `json:"ai_fps,omitempty"`
+	ID         string        `json:"id"`
+	URL        string        `json:"url"`
+	RTSP       string        `json:"rtsp"`
+	Started    bool          `json:"started"`
+	Ready      bool          `json:"ready"`
+	Error      string        `json:"error,omitempty"`
+	Tracks     []streamTrack `json:"tracks,omitempty"`
+	RTP        uint32        `json:"rtp,omitempty"`
+	AI         any           `json:"ai,omitempty"`
+	AIAgeMS    int64         `json:"ai_age_ms,omitempty"`
+	AIFPS      float64       `json:"ai_fps,omitempty"`
+	OutputType int           `json:"output_type,omitempty"`
 }
 
 type streamBox struct {
