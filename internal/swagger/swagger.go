@@ -19,8 +19,7 @@ type helloResponse struct {
 }
 
 type streamStart struct {
-	URL  string `json:"url" default:"udp://224.2.0.1:5484" example:"udp://224.2.0.1:5484"`
-	Burn bool   `json:"burn,omitempty"`
+	URL string `json:"url" default:"udp://224.2.0.1:5484" example:"udp://224.2.0.1:5484"`
 }
 
 type streamURL struct {
@@ -64,7 +63,6 @@ type streamMeta struct {
 	RTSP    string        `json:"rtsp"`
 	Started bool          `json:"started"`
 	Ready   bool          `json:"ready"`
-	Burn    bool          `json:"burn"`
 	Error   string        `json:"error,omitempty"`
 	Tracks  []streamTrack `json:"tracks,omitempty"`
 	RTP     uint32        `json:"rtp,omitempty"`

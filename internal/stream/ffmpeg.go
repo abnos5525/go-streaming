@@ -1,10 +1,8 @@
-// ffmpeg.go builds the ffmpeg invocations: HLS copy, burned-in re-encode
-// and fragmented-MP4 remux commands plus input helpers.
+// ffmpeg.go builds the ffmpeg invocations: HLS copy and RTP remux.
 package stream
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 
@@ -61,38 +59,3 @@ func ffmpegCmd(in, out string, rtpPort int) *exec.Cmd {
 		"-f", "rtp", fmt.Sprintf("rtp://127.0.0.1:%d", rtpPort))
 	return exec.Command("ffmpeg", args...)
 }
-
-// ffmpegBurnCmd burns the Go-rendered overlay into pixels (re-encode).
-// The overlay arrives as live rawvideo on pipe:3 (see pumpBurnOverlay):
-// no disk IO, no ffmpeg restart per AI frame, no version-specific flags.
-// scale2ref adapts the fixed burn canvas to the actual video size, then the
-// stream splits to HLS and RTP outputs (both encoded, same keyframes).
-func ffmpegBurnCmd(in, out string, rtpPort int) *exec.Cmd {
-	args := []string{"-hide_banner", "-loglevel", "error"}
-	args = append(args, ffmpegNet(in)...)
-	args = append(args, ffmpegFastInput()...)
-	args = append(args,
-		"-i", in,
-		"-thread_queue_size", "16",
-		"-f", "rawvideo", "-video_size", burnSize(), "-pix_fmt", "rgba", "-framerate", "2", "-i", "pipe:3",
-		"-filter_complex", "[1:v][0:v]scale2ref=flags=neighbor[ov][base];[base][ov]overlay=0:0:eval=frame,format=yuv420p,split=2[vh][vm]",
-		"-map", "[vh]", "-an",
-		"-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "23",
-		"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%g)", hlsSegTime()),
-	)
-	args = append(args, ffmpegHLS(out)...)
-	args = append(args,
-		"-map", "[vm]", "-an",
-		"-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "23",
-		"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%g)", hlsSegTime()),
-		"-f", "rtp", fmt.Sprintf("rtp://127.0.0.1:%d", rtpPort),
-	)
-	return exec.Command("ffmpeg", args...)
-}
-
-func burnSize() string { return fmt.Sprintf("%dx%d", burnW, burnH) }
-
-func defaultBurn() bool { return os.Getenv("BURN") == "1" }
-
-// DefaultBurn reports the server default for burn mode (BURN=1).
-func DefaultBurn() bool { return defaultBurn() }

@@ -26,36 +26,35 @@ func (o rtcOffer) SessionDescription() (webrtc.SessionDescription, error) {
 	return webrtc.SessionDescription{Type: t, SDP: o.SDP}, nil
 }
 
-// startTracker draws AI boxes every animation frame for one video panel,
-// extrapolating each box along its recent velocity so boxes glide instead
-// of jumping on every overlay poll. A hidden canvas is skipped (burn mode).
+// startTracker draws AI boxes on a client canvas (never burned into pixels).
+// lagFn, if set, returns how far the video element is behind live (ms).
+// That value is the overlay hold, so boxes share the picture's timestamp.
 const trackerJS = `
-function startTracker(vId, cId, ovURL) {
+function playerLagMS(el, hls) {
+  if (hls && typeof hls.latency === 'number' && isFinite(hls.latency) && hls.latency > 0)
+    return Math.round(hls.latency * 1000);
+  try {
+    if (el.seekable && el.seekable.length) {
+      const live = el.seekable.end(el.seekable.length - 1);
+      const lag = live - el.currentTime;
+      if (lag > 0.05 && lag < 60) return Math.round(lag * 1000);
+    }
+  } catch (e) {}
+  return null;
+}
+function startTracker(vId, cId, ovURL, lagFn) {
 const v = document.getElementById(vId), c = document.getElementById(cId), x = c.getContext('2d');
-let ovPrev = null, ovCur = null, tPrev = 0, tCur = 0;
+let ovCur = null;
 function fit() { c.width = v.clientWidth; c.height = v.clientHeight; }
 addEventListener('resize', fit); v.addEventListener('loadedmetadata', fit); v.addEventListener('play', fit);
 async function fetchOv() {
   if (c.style.display === 'none') return;
   try {
-    const o = await (await fetch(ovURL)).json();
-    ovPrev = ovCur; tPrev = tCur; ovCur = o; tCur = performance.now();
+    let url = ovURL;
+    const lag = typeof lagFn === 'function' ? lagFn() : null;
+    if (lag != null && lag >= 0) url += (ovURL.indexOf('?') >= 0 ? '&' : '?') + 'lag_ms=' + lag;
+    ovCur = await (await fetch(url)).json();
   } catch (e) {}
-}
-function matchBox(b, list) {
-  if (!list || !list.boxes) return null;
-  if (b.track_id) {
-    const hit = list.boxes.find(q => q.track_id === b.track_id);
-    return hit || null;
-  }
-  const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
-  let best = null, bd = 1e9;
-  for (const q of list.boxes) {
-    if (q.label !== b.label) continue;
-    const d = Math.hypot((q.x + q.w / 2) - cx, (q.y + q.h / 2) - cy);
-    if (d < bd) { bd = d; best = q; }
-  }
-  return bd <= Math.max(b.w, b.h) * 0.75 + 30 ? best : null;
 }
 function drawBoxes() {
   requestAnimationFrame(drawBoxes);
@@ -65,54 +64,37 @@ function drawBoxes() {
   if (!ovCur || !ovCur.boxes || !ovCur.boxes.length) return;
   const rw = ovCur.width || v.videoWidth || c.width, rh = ovCur.height || v.videoHeight || c.height;
   const sx = c.width / rw, sy = c.height / rh;
-  const rate = v.playbackRate || 1;
-  const e = Math.min((performance.now() - tCur) * rate, 1000);
-  const span = (ovCur.timestamp && ovPrev && ovPrev.timestamp) ? (ovCur.timestamp - ovPrev.timestamp) : 0;
-  const lead = span > 0 ? Math.min(e, span) : 0;
   x.lineWidth = 2; x.font = '14px sans-serif';
   for (const b of ovCur.boxes) {
-    let px = b.x, py = b.y;
-    if (lead > 0) {
-      const q = matchBox(b, ovPrev);
-      if (q) { px = b.x + (b.x - q.x) / span * lead; py = b.y + (b.y - q.y) / span * lead; }
-    }
-    x.strokeStyle = '#0f0'; x.strokeRect(px * sx, py * sy, b.w * sx, b.h * sy);
+    x.strokeStyle = '#0f0'; x.strokeRect(b.x * sx, b.y * sy, b.w * sx, b.h * sy);
     const t = b.confidence ? b.label + ' ' + b.confidence.toFixed(2) : b.label;
     const w = x.measureText(t).width + 8;
-    x.fillStyle = '#0f0'; x.fillRect(px * sx, py * sy - 18, w, 18);
-    x.fillStyle = '#000'; x.fillText(t, px * sx + 4, py * sy - 5);
+    x.fillStyle = '#0f0'; x.fillRect(b.x * sx, b.y * sy - 18, w, 18);
+    x.fillStyle = '#000'; x.fillText(t, b.x * sx + 4, b.y * sy - 5);
   }
 }
-setInterval(fetchOv, 500); fetchOv(); requestAnimationFrame(drawBoxes);
+setInterval(fetchOv, 100); fetchOv(); requestAnimationFrame(drawBoxes);
 }
 `
 
 func playPage(id string) string {
 	src := "/hls/" + id + "/index.m3u8"
 	overlay := "/stream/overlay/" + id
-	overlayRTC := "/stream/overlay/" + id + "?lag_ms=400"
 	rtcOffer := "/webrtc/" + id + "/offer"
-	meta := "/stream/meta/" + id
 	return `<!doctype html>
 <meta charset="utf-8">
-<style>body{margin:0;background:#000;color:#0f0;font:12px sans-serif}.row{display:flex;gap:8px;padding:8px}.col{flex:1;min-width:0;position:relative}.wrap{position:relative}video{width:100%;display:block;background:#000}canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}.tag{position:absolute;top:8px;left:8px;background:#0f0;color:#000;padding:2px 6px}.badge{position:absolute;top:8px;right:8px;background:#0f0;color:#000;padding:2px 6px;display:none}</style>
+<style>body{margin:0;background:#000;color:#0f0;font:12px sans-serif}.row{display:flex;gap:8px;padding:8px}.col{flex:1;min-width:0;position:relative}.wrap{position:relative}video{width:100%;display:block;background:#000}canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}.tag{position:absolute;top:8px;left:8px;background:#0f0;color:#000;padding:2px 6px}</style>
 <div class="row">
-<div class="col"><div class="wrap"><video id="v" autoplay playsinline muted controls></video><canvas id="o"></canvas><div class="tag">HLS</div><div id="b" class="badge">BURNED-IN</div></div></div>
+<div class="col"><div class="wrap"><video id="v" autoplay playsinline muted controls></video><canvas id="o"></canvas><div class="tag">HLS</div></div></div>
 <div class="col"><div class="wrap"><video id="v2" autoplay playsinline muted></video><canvas id="o2"></canvas><div class="tag" id="s2">WEBRTC</div></div></div>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
 <script>
-const b = document.getElementById('b'), s2 = document.getElementById('s2');
+const s2 = document.getElementById('s2');
 const src = '` + src + `', rtcURL = '` + rtcOffer + `';
-fetch('` + meta + `').then(r => r.json()).then(m => {
-  if (m && m.burn) {
-    document.getElementById('o').style.display = 'none';
-    document.getElementById('o2').style.display = 'none';
-    b.style.display = 'block';
-  }
-}).catch(() => {});
 const v = document.getElementById('v');
-if (window.Hls && Hls.isSupported()) { const h = new Hls({lowLatencyMode: true, liveSyncDurationCount: 2, liveMaxLatencyDurationCount: 4, maxBufferLength: 2, maxLiveSyncPlaybackRate: 1.5}); h.loadSource(src); h.attachMedia(v); }
+let hlsPlayer = null;
+if (window.Hls && Hls.isSupported()) { hlsPlayer = new Hls({lowLatencyMode: true, liveSyncDurationCount: 2, liveMaxLatencyDurationCount: 4, maxBufferLength: 2, maxLiveSyncPlaybackRate: 1.5}); hlsPlayer.loadSource(src); hlsPlayer.attachMedia(v); }
 else if (v.canPlayType('application/vnd.apple.mpegurl')) { v.src = src; }
 async function startRTC() {
   const v2 = document.getElementById('v2');
@@ -162,8 +144,8 @@ startRTC();
 </script>
 <script>
 ` + trackerJS + `
-startTracker('v', 'o', '` + overlay + `');
-startTracker('v2', 'o2', '` + overlayRTC + `');
+startTracker('v', 'o', '` + overlay + `', () => playerLagMS(v, hlsPlayer));
+startTracker('v2', 'o2', '` + overlay + `', () => playerLagMS(document.getElementById('v2')) ?? 100);
 </script>`
 }
 
@@ -236,20 +218,13 @@ func registerStream(r *gin.Engine) {
 	})
 	r.POST("/stream/start", func(c *gin.Context) {
 		var req struct {
-			URL  string `json:"url"`
-			Burn *bool  `json:"burn"`
+			URL string `json:"url"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil && c.Request.ContentLength != 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"message": err.Error()})
 			return
 		}
-		burn := stream.DefaultBurn()
-		if req.Burn != nil {
-			burn = *req.Burn
-		} else if q := c.Query("burn"); q == "1" || q == "true" {
-			burn = true
-		}
-		m, err := stream.StartWithBurn(req.URL, burn)
+		m, err := stream.Start(req.URL)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"message": err.Error()})
 			return

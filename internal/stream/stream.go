@@ -55,7 +55,6 @@ type session struct {
 	proc          *os.Process
 	gen           int
 	running       bool
-	burn          bool
 	spsB64        string
 	ppsB64        string
 	mp4Proc       *os.Process
@@ -83,7 +82,6 @@ type Meta struct {
 	RTSP    string      `json:"rtsp"`
 	Started bool        `json:"started"`
 	Ready   bool        `json:"ready"`
-	Burn    bool        `json:"burn"`
 	Error   string      `json:"error,omitempty"`
 	Tracks  []Track     `json:"tracks,omitempty"`
 	RTP     uint32      `json:"rtp,omitempty"`
@@ -125,26 +123,7 @@ func (s *session) playlist() string { return "/hls/" + s.id + "/index.m3u8" }
 
 func (s *session) meta() Meta { return s.metaLag(-1) }
 
-// burnExtraMS covers re-encode latency on the burn lane (decode + overlay +
-// libx264 + mux). The playlist measures media time, but baked pixels also
-// wait out the encoder in wall time, so the hold must too. Default 400ms.
-func burnExtraMS() int64 {
-	if v, err := strconv.ParseInt(os.Getenv("BURN_EXTRA_MS"), 10, 64); err == nil && v >= 0 && v <= 5000 {
-		return v
-	}
-	return 400
-}
-
-// laneLag is the fresh hold for this session's lane: HLS playlist depth
-// plus burn encode latency. Read live (not from stored delayMS) so an
-// unwatched burn stream never syncs to a stale value.
-func (s *session) laneLag() int64 {
-	lag := s.hlsLagMS()
-	if s.burn {
-		lag += burnExtraMS()
-	}
-	return lag
-}
+func (s *session) laneLag() int64 { return s.hlsLagMS() }
 
 // fpsOf estimates arrivals/sec over the buffered window.
 func fpsOf(arr []int64) float64 {
@@ -176,7 +155,7 @@ func (s *session) metaLag(want int64) Meta {
 			age = 0
 		}
 	}
-	return Meta{ID: s.id, URL: s.playlist(), RTSP: s.url, Started: s.running, Ready: err == nil, Burn: s.burn, Error: s.last, Tracks: s.tracks, RTP: s.rtpTS.Load(), AI: s.delayedAI(lag), AIAgeMS: age, AIFPS: fpsOf(s.arr)}
+	return Meta{ID: s.id, URL: s.playlist(), RTSP: s.url, Started: s.running, Ready: err == nil, Error: s.last, Tracks: s.tracks, RTP: s.rtpTS.Load(), AI: s.delayedAI(lag), AIAgeMS: age, AIFPS: fpsOf(s.arr)}
 }
 
 func sessByID(id string) *session {
@@ -218,30 +197,17 @@ func resolve(url string) (string, error) {
 	}
 }
 
-func Start(url string) (Meta, error) { return StartWithBurn(url, defaultBurn()) }
-
-func StartWithBurn(url string, burn bool) (Meta, error) {
+func Start(url string) (Meta, error) {
 	url, err := resolve(url)
 	if err != nil {
 		return Meta{}, err
 	}
 	mu.Lock()
 	if s, ok := sessions[url]; ok && s.running {
-		if s.burn == burn {
-			mu.Unlock()
-			return s.meta(), nil
-		}
-		s.gen++
-		if s.proc != nil {
-			_ = s.proc.Kill()
-			s.proc = nil
-		}
-		s.stopMP4Locked()
-		s.stopRTCLocked()
-		s.running = false
-		delete(sessions, url)
+		mu.Unlock()
+		return s.meta(), nil
 	}
-	s := &session{url: url, id: idFor(url), running: true, burn: burn, gen: 1}
+	s := &session{url: url, id: idFor(url), running: true, gen: 1}
 	s.delayMS.Store(aiDelayMS())
 	if hub, err := newRTCHub(); err != nil {
 		mu.Unlock()
@@ -339,42 +305,15 @@ func (s *session) loop(my int) {
 			go s.pumpRTP(my, rconn, hub.track)
 		}
 		cmd := ffmpegCmd(in, out, rtpPort)
-		var pr, pw *os.File
-		var done chan struct{}
-		if s.burn {
-			var err error
-			if pr, pw, err = os.Pipe(); err != nil {
-				_ = rconn.Close()
-				s.set(err.Error())
-				time.Sleep(2 * time.Second)
-				continue
-			}
-			cmd = ffmpegBurnCmd(in, out, rtpPort)
-			cmd.ExtraFiles = []*os.File{pr}
-			done = make(chan struct{})
-			go s.pumpBurnOverlay(my, pw, done)
-		}
 		var stderr bytes.Buffer
 		cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
 		log.Printf("hls %s ffmpeg %s", s.id, strings.Join(cmd.Args, " "))
 		if err := cmd.Start(); err != nil {
 			_ = rconn.Close()
-			if done != nil {
-				close(done)
-			}
-			if pr != nil {
-				_ = pr.Close()
-			}
-			if pw != nil {
-				_ = pw.Close() // unblock pumper: no reader will ever come
-			}
 			s.set(err.Error())
 			log.Printf("hls %s: %v", s.id, err)
 			time.Sleep(2 * time.Second)
 			continue
-		}
-		if pr != nil {
-			_ = pr.Close() // child holds its own dup of pipe:3
 		}
 		mu.Lock()
 		if s.gen != my {
@@ -382,24 +321,12 @@ func (s *session) loop(my int) {
 			_ = cmd.Process.Kill()
 			_ = cmd.Wait()
 			_ = rconn.Close()
-			if done != nil {
-				close(done)
-			}
-			if pw != nil {
-				_ = pw.Close()
-			}
 			return
 		}
 		s.proc = cmd.Process
 		mu.Unlock()
 		err = cmd.Wait()
 		_ = rconn.Close()
-		if done != nil {
-			close(done)
-		}
-		if pw != nil {
-			_ = pw.Close() // unblock a pumper stuck in Write
-		}
 		mu.Lock()
 		if s.proc == cmd.Process {
 			s.proc = nil
@@ -506,20 +433,38 @@ func aiOffsetMS() int64 {
 	return v
 }
 
-// delayedAIAt picks the frame to show now. In-band AI arrives together with
-// the video it describes, so the correct frame is the newest one held for
-// the full lane delay: target = now - delay - offset, matched on server
-// arrival time. Camera timestamps are never compared to the wall clock, so
-// sender clock skew cannot shift boxes. Startup (nothing held long enough)
-// shows the oldest available frame instead of nothing.
+// delayedAIAt picks the AI frame that describes the picture currently on
+// screen. The player is delayMS behind live; the newest camera timestamp
+// is "live", so the match is newest Frame.Timestamp ≤ latest − delay − offset.
+// Clocks are never mixed with wall time, so sender skew cannot shift boxes.
+// delayMS == 0 is live (latest frame). delayMS < 0 falls back to aiDelayMS.
+// Missing timestamps fall back to arrival age. Startup with nothing old
+// enough returns the oldest buffered frame instead of nothing.
 func (s *session) delayedAIAt(delayMS, nowMS int64) *ai.AIFrame {
 	if len(s.buf) == 0 {
 		return nil
 	}
-	if delayMS <= 0 {
+	if delayMS < 0 {
 		delayMS = aiDelayMS()
 	}
-	target := nowMS - delayMS - aiOffsetMS()
+	off := aiOffsetMS()
+	if delayMS == 0 {
+		return s.buf[len(s.buf)-1]
+	}
+	if latest := s.buf[len(s.buf)-1].Frame.Timestamp; latest > 0 {
+		target := latest - delayMS - off
+		var best *ai.AIFrame
+		for _, f := range s.buf {
+			if f.Frame.Timestamp <= target {
+				best = f
+			}
+		}
+		if best != nil {
+			return best
+		}
+		return s.buf[0]
+	}
+	target := nowMS - delayMS - off
 	var best *ai.AIFrame
 	for i := range s.buf {
 		if i < len(s.arr) && s.arr[i] <= target {
@@ -587,10 +532,9 @@ func (s *session) hlsLagMS() int64 {
 	if ms := playlistLagMS(durs); ms > 0 {
 		// GOP too long for the requested segment: copy can't cut
 		// without a keyframe, so the playlist holds many seconds.
-		// Warn once per session so operator can shorten camera GOP
-		// or use burn (forced keyframes).
+		// Warn once per session so operator can shorten camera GOP.
 		if ms > int64(hlsSegTime()*3000) && s.last != "long GOP" {
-			log.Printf("hls %s segment %.1fs > 3x target %.1fs: camera GOP too long, shorten GOP or enable burn", s.id, float64(ms)/1000, hlsSegTime())
+			log.Printf("hls %s segment %.1fs > 3x target %.1fs: camera GOP too long, shorten GOP", s.id, float64(ms)/1000, hlsSegTime())
 			s.last = "long GOP"
 		}
 		return ms

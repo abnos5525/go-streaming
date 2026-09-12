@@ -121,7 +121,7 @@ func TestDelayedAI(t *testing.T) {
 		f.Frame.Timestamp = base + int64(i)*1000
 		s.pushAI(f, 990000+int64(i)*1000)
 	}
-	// Hold semantics: newest frame held ≥ delay wins.
+	// Timestamp hold: newest Frame.Timestamp ≤ latest − delay.
 	got := s.delayedAIAt(8000, 1000000)
 	if got == nil || got.Frame.Timestamp != base+2000 {
 		t.Fatalf("want held-8s (%d), got %v", base+2000, got)
@@ -129,12 +129,35 @@ func TestDelayedAI(t *testing.T) {
 	if got := s.delayedAIAt(3000, 1000000); got == nil || got.Frame.Timestamp != base+7000 {
 		t.Fatalf("want held-3s, got %v", got)
 	}
+	if got := s.delayedAIAt(0, 1000000); got == nil || got.Frame.Timestamp != base+10000 {
+		t.Fatalf("lag 0 must be latest, got %v", got)
+	}
 	same := &ai.AIFrame{}
 	same.Frame.Timestamp = base + 10000
 	same.TypeMessage = 6
 	s.pushAI(same, 1000500)
 	if s.buf[len(s.buf)-1].TypeMessage != 6 || s.arr[len(s.arr)-1] != 1000500 {
 		t.Fatal("same timestamp not replaced")
+	}
+}
+
+func TestDelayedAITimestampJitter(t *testing.T) {
+	s := &session{}
+	// One frame arrives late; pick must follow camera timestamps, not arrival.
+	for _, f := range []struct{ ts, arr int64 }{
+		{1000, 1000},
+		{2000, 2000},
+		{3000, 4500},
+		{4000, 4600},
+		{5000, 5000},
+	} {
+		fr := &ai.AIFrame{}
+		fr.Frame.Timestamp = f.ts
+		s.pushAI(fr, f.arr)
+	}
+	got := s.delayedAIAt(2000, 5000)
+	if got == nil || got.Frame.Timestamp != 3000 {
+		t.Fatalf("want ts 3000 (latest-2000), got %v", got)
 	}
 }
 
@@ -161,8 +184,8 @@ func TestPlaylistLagMS(t *testing.T) {
 func TestDelayedAISkewProof(t *testing.T) {
 	now := time.Now().UnixMilli()
 	s := &session{}
-	// Camera clock in a foreign epoch; arrivals ride the server clock.
-	// Hold picks by arrival age, so skew cannot shift boxes.
+	// Camera clock in a foreign epoch. Hold is relative to latest
+	// Frame.Timestamp, so skew cannot shift boxes.
 	for i := 0; i <= 10; i++ {
 		f := &ai.AIFrame{}
 		f.Frame.Timestamp = 5_000_000_000 + int64(i)*1000
@@ -216,10 +239,6 @@ func TestLowLatencyDefaults(t *testing.T) {
 			t.Fatalf("ffmpeg cmd missing %q: %s", want, s)
 		}
 	}
-	b := strings.Join(ffmpegBurnCmd("in", "out", 23456).Args, " ")
-	if !strings.Contains(b, "force_key_frames") {
-		t.Fatalf("burn cmd must force keyframes: %s", b)
-	}
 }
 
 func TestLaneLagFresh(t *testing.T) {
@@ -234,9 +253,6 @@ func TestLaneLagFresh(t *testing.T) {
 	}
 	if got := (&session{id: id}).laneLag(); got != 2000 {
 		t.Fatalf("copy lane: want 2000, got %d", got)
-	}
-	if got := (&session{id: id, burn: true}).laneLag(); got != 2400 {
-		t.Fatalf("burn lane: want 2400, got %d", got)
 	}
 }
 
@@ -267,8 +283,8 @@ func TestAIFPSAge(t *testing.T) {
 }
 
 // TestHoldMotionSim drives a synthetic gliding object (100px/s, AI at 2Hz
-// in-band) through the burn-lane hold and proves the shown box trails the
-// displayed video by less than one AI interval, then glides the rest.
+// in-band) through the HLS hold and proves the shown box trails the
+// displayed video by less than one AI interval.
 func TestHoldMotionSim(t *testing.T) {
 	s := &session{}
 	base := int64(1_000_000)
@@ -282,7 +298,7 @@ func TestHoldMotionSim(t *testing.T) {
 		s.pushAI(f, ts+50) // LAN arrival ~ capture
 	}
 	now := base + 9*500 + 50
-	got := s.delayedAIAt(2400, now) // 2s HLS depth + 400ms encode
+	got := s.delayedAIAt(2400, now) // player 2.4s behind live AI timestamp
 	if got == nil || got.Frame.Timestamp != base+2000 {
 		t.Fatalf("hold missed: %+v", got)
 	}

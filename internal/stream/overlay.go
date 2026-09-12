@@ -23,11 +23,11 @@ type Overlay struct {
 }
 
 // OverlayByID returns the delay-compensated AI overlay for a stream.
-// It reuses ByID/Meta so boxes stay in sync with what the viewer sees via HLS.
 func OverlayByID(id string) (Overlay, bool) { return OverlayByIDLag(id, -1) }
 
-// OverlayByIDLag is OverlayByID with an explicit AI delay in ms.
-// lag < 0 means auto (HLS delay); the mp4/MSE lane passes ~700.
+// OverlayByIDLag is OverlayByID with an explicit player-behind-live delay.
+// lag < 0 means auto (playlist estimate). lag == 0 is the latest AI frame.
+// The play page should pass the player's measured latency, not a guess.
 func OverlayByIDLag(id string, lagMS int64) (Overlay, bool) {
 	mu.Lock()
 	s := sessByID(id)
