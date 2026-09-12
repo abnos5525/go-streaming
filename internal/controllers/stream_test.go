@@ -15,8 +15,8 @@ func TestPlayerPagesAreSingleLane(t *testing.T) {
 	if strings.Count(rtc, "<video") != 1 || strings.Contains(rtc, "hls.js") || strings.Contains(rtc, "index.m3u8") {
 		t.Fatal("output_type 7 must be WebRTC only")
 	}
-	if !strings.Contains(trackerJS, "videoReady") || !strings.Contains(hls, "videoReady") {
-		t.Fatal("overlay must wait for a video frame")
+	if !strings.Contains(trackerJS, "requestVideoFrameCallback") || !strings.Contains(rtc, "_gotFrame") {
+		t.Fatal("WebRTC overlay must wait for a painted frame before delay")
 	}
 }
 

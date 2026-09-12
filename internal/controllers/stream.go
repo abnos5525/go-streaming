@@ -43,13 +43,34 @@ function playerLagMS(el, hls) {
   return null;
 }
 function videoReady(el) {
-  return el && el.readyState >= 2 && el.videoWidth > 0 && el.videoHeight > 0;
+  if (!el || el.readyState < 2 || el.videoWidth < 2 || el.videoHeight < 2) return false;
+  if (el._gotFrame) return true;
+  try {
+    if (el.getVideoPlaybackQuality && el.getVideoPlaybackQuality().totalVideoFrames > 0) {
+      el._gotFrame = true; return true;
+    }
+  } catch (e) {}
+  if (el.webkitDecodedFrameCount > 0) { el._gotFrame = true; return true; }
+  return false;
 }
 function startTracker(vId, cId, ovURL, lagFn) {
 const v = document.getElementById(vId), c = document.getElementById(cId), x = c.getContext('2d');
 let ovCur = null;
 function fit() { c.width = v.clientWidth; c.height = v.clientHeight; }
 addEventListener('resize', fit); v.addEventListener('loadedmetadata', fit); v.addEventListener('play', fit);
+function waitPaint() {
+  const mark = () => { v._gotFrame = true; };
+  v._gotFrame = false;
+  if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(mark);
+  v.addEventListener('playing', () => {
+    if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(mark);
+  });
+  v.addEventListener('emptied', () => {
+    v._gotFrame = false; ovCur = null;
+    if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(mark);
+  });
+}
+waitPaint();
 async function fetchOv() {
   if (c.style.display === 'none' || !videoReady(v)) return;
   try {
