@@ -66,7 +66,7 @@ type session struct {
 	delayMS       atomic.Int64
 	buf           []*ai.AIFrame
 	arr           []int64 // server arrival ms per buf entry (same order)
-	out           int     // 6 = HLS, 7 = WebRTC; first start wins
+	out           int     // 6 = HLS, 7 = WebRTC; latest start wins
 }
 
 type Track struct {
@@ -207,17 +207,18 @@ func Start(url string, outputType int) (Meta, error) {
 	}
 	mu.Lock()
 	if s, ok := sessions[url]; ok && s.running {
-		s.out = outputType
+		if err := s.setLaneLocked(outputType); err != nil {
+			mu.Unlock()
+			return Meta{}, err
+		}
 		mu.Unlock()
 		return s.meta(), nil
 	}
 	s := &session{url: url, id: idFor(url), running: true, gen: 1, out: outputType}
 	s.delayMS.Store(aiDelayMS())
-	if hub, err := newRTCHub(); err != nil {
+	if err := s.setLaneLocked(outputType); err != nil {
 		mu.Unlock()
 		return Meta{}, err
-	} else {
-		s.rtcHub = hub
 	}
 	sessions[url] = s
 	my := s.gen
@@ -258,19 +259,39 @@ func Stop(url string) error {
 	return nil
 }
 
-func (s *session) loop(my int) {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		s.set("ffmpeg not in PATH")
-		log.Print("hls: ffmpeg not in PATH")
-		s.stopIf(my)
-		return
+// setLaneLocked applies output_type. WebRTC gets a pion hub; HLS drops it
+// so unused peer connections do not sit around. Caller holds mu.
+func (s *session) setLaneLocked(outputType int) error {
+	s.out = outputType
+	if outputType == 7 {
+		if s.rtcHub != nil {
+			return nil
+		}
+		hub, err := newRTCHub()
+		if err != nil {
+			return err
+		}
+		s.rtcHub = hub
+		return nil
 	}
+	s.stopRTCLocked()
+	return nil
+}
+
+func (s *session) want(my, typ int) bool {
+	mu.Lock()
+	defer mu.Unlock()
+	return s.gen == my && s.out == typ
+}
+
+func (s *session) loop(my int) {
 	in := ffmpegInput(s.url)
+	sniffed := false
 	if u := rtp.MulticastURL(s.url); u != nil {
 		p := filepath.Join(dir, s.id, "in.sdp")
 		if mc, err := rtp.JoinMulticast(u); err != nil {
 			s.set(err.Error())
-			log.Printf("hls %s multicast listen: %v", s.id, err)
+			log.Printf("ingest %s multicast listen: %v", s.id, err)
 			_ = os.WriteFile(p, []byte(rtp.SDP(u, "", "")), 0o644)
 			in = p
 		} else {
@@ -281,77 +302,128 @@ func (s *session) loop(my int) {
 				s.set(err.Error())
 			} else {
 				in = p
+				sniffed = true
 				go s.sniff(my, mc, rp)
 			}
 		}
 	}
-	log.Printf("hls %s input %s", s.id, in)
-	out := filepath.Join(dir, s.id, "index.m3u8")
-	go s.probeWhenReady(my, out)
-	for {
-		if !s.alive(my) {
-			return
+	log.Printf("ingest %s input %s sniffed=%v", s.id, in, sniffed)
+	go s.hlsLoop(my, in)
+	if !sniffed {
+		go s.rtcRemux(my, in)
+	}
+}
+
+func (s *session) hlsLoop(my int, in string) {
+	playlist := filepath.Join(dir, s.id, "index.m3u8")
+	probed := false
+	for s.alive(my) {
+		if !s.want(my, 6) {
+			time.Sleep(200 * time.Millisecond)
+			continue
 		}
-		_ = os.Remove(out)
-		// Both lanes leave this one ffmpeg: HLS to disk, RTP to the
-		// WebRTC hub on localhost. Same input, same settings, same run.
-		rconn, rtpPort, err := bindRTCPort(s.id)
+		if _, err := exec.LookPath("ffmpeg"); err != nil {
+			s.set("ffmpeg not in PATH")
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		if !probed {
+			go s.probeWhenReady(my, playlist)
+			probed = true
+		}
+		_ = os.Remove(playlist)
+		s.runFF(my, 6, ffmpegHLSCmd(in, playlist))
+	}
+}
+
+// rtcRemux is only for sources sniff cannot take (RTSP, or multicast
+// join failed). The company UDP path writes RTP straight into pion.
+func (s *session) rtcRemux(my int, in string) {
+	for s.alive(my) {
+		if !s.want(my, 7) {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		if _, err := exec.LookPath("ffmpeg"); err != nil {
+			s.set("ffmpeg not in PATH")
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		rconn, port, err := bindRTCPort(s.id)
 		if err != nil {
 			s.set(err.Error())
-			log.Printf("hls %s: %v", s.id, err)
 			time.Sleep(2 * time.Second)
 			continue
 		}
 		mu.Lock()
 		hub := s.rtcHub
 		mu.Unlock()
-		if hub != nil {
-			go s.pumpRTP(my, rconn, hub.track)
-		}
-		cmd := ffmpegCmd(in, out, rtpPort)
-		var stderr bytes.Buffer
-		cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
-		log.Printf("hls %s ffmpeg %s", s.id, strings.Join(cmd.Args, " "))
-		if err := cmd.Start(); err != nil {
+		if hub == nil {
 			_ = rconn.Close()
-			s.set(err.Error())
-			log.Printf("hls %s: %v", s.id, err)
-			time.Sleep(2 * time.Second)
+			time.Sleep(200 * time.Millisecond)
 			continue
 		}
-		mu.Lock()
-		if s.gen != my {
-			mu.Unlock()
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-			_ = rconn.Close()
-			return
-		}
-		s.proc = cmd.Process
-		mu.Unlock()
-		err = cmd.Wait()
+		go s.pumpRTP(my, rconn, hub.track)
+		s.runFF(my, 7, ffmpegRTPCmd(in, port))
 		_ = rconn.Close()
-		mu.Lock()
-		if s.proc == cmd.Process {
-			s.proc = nil
-		}
-		gone := s.gen != my
-		mu.Unlock()
-		if gone {
-			return
-		}
-		if err != nil {
-			msg := tailErr(strings.TrimSpace(stderr.String()))
-			if msg == "" {
-				msg = err.Error()
-			}
-			s.set(msg)
-			log.Printf("hls %s: %v", s.id, err)
-		} else {
-			s.set("ffmpeg exited")
-		}
-		time.Sleep(2 * time.Second)
 	}
+}
+
+func (s *session) runFF(my, typ int, cmd *exec.Cmd) {
+	var stderr bytes.Buffer
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
+	log.Printf("%s ffmpeg %s", s.id, strings.Join(cmd.Args, " "))
+	if err := cmd.Start(); err != nil {
+		s.set(err.Error())
+		time.Sleep(2 * time.Second)
+		return
+	}
+	mu.Lock()
+	if s.gen != my {
+		mu.Unlock()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return
+	}
+	s.proc = cmd.Process
+	mu.Unlock()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	var err error
+	for {
+		select {
+		case err = <-done:
+			goto ended
+		case <-time.After(200 * time.Millisecond):
+			if !s.want(my, typ) {
+				_ = cmd.Process.Kill()
+				err = <-done
+				goto ended
+			}
+		}
+	}
+ended:
+	mu.Lock()
+	if s.proc == cmd.Process {
+		s.proc = nil
+	}
+	alive := s.gen == my
+	keep := s.out == typ
+	mu.Unlock()
+	if !alive || !keep {
+		return
+	}
+	if err != nil {
+		msg := tailErr(strings.TrimSpace(stderr.String()))
+		if msg == "" {
+			msg = err.Error()
+		}
+		s.set(msg)
+		log.Printf("%s: %v", s.id, err)
+	} else {
+		s.set("ffmpeg exited")
+	}
+	time.Sleep(2 * time.Second)
 }
 
 func (s *session) alive(my int) bool {

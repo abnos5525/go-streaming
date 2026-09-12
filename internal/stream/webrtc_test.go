@@ -21,14 +21,14 @@ func TestWebRTCPort(t *testing.T) {
 }
 
 func TestFFmpegRTPCmd(t *testing.T) {
-	s := strings.Join(ffmpegCmd("in", "out", 23456).Args, " ")
+	s := strings.Join(ffmpegRTPCmd("in", 23456).Args, " ")
 	for _, want := range []string{"-c:v", "copy", "-f", "rtp", "127.0.0.1:23456"} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("rtp cmd missing %q: %s", want, s)
 		}
 	}
-	if strings.Contains(s, "libx264") || strings.Contains(s, "pipe:") {
-		t.Fatalf("rtp lane must stay copy: %s", s)
+	if strings.Contains(s, "libx264") || strings.Contains(s, "pipe:") || strings.Contains(s, "hls") {
+		t.Fatalf("rtp fallback must stay copy RTP only: %s", s)
 	}
 }
 

@@ -1,4 +1,5 @@
-// ffmpeg.go builds the ffmpeg invocations: HLS copy and RTP remux.
+// ffmpeg.go builds copy-mode ffmpeg: HLS for type 6, RTP remux only as
+// the RTSP/fallback path into pion. Multicast WebRTC does not call these.
 package stream
 
 import (
@@ -48,14 +49,22 @@ func ffmpegHLS(out string) []string {
 	}
 }
 
-func ffmpegCmd(in, out string, rtpPort int) *exec.Cmd {
+func ffmpegHLSCmd(in, out string) *exec.Cmd {
 	args := []string{"-hide_banner", "-loglevel", "error"}
 	args = append(args, ffmpegNet(in)...)
 	args = append(args, ffmpegFastInput()...)
-	args = append(args, "-i", in)
-	args = append(args, "-map", "0:v", "-an", "-c:v", "copy")
+	args = append(args, "-i", in, "-map", "0:v", "-an", "-c:v", "copy")
 	args = append(args, ffmpegHLS(out)...)
-	args = append(args, "-map", "0:v", "-an", "-c:v", "copy",
+	return exec.Command("ffmpeg", args...)
+}
+
+// ffmpegRTPCmd is the RTSP/fallback remux into localhost RTP for pion.
+// Multicast WebRTC does not use this: sniff writes the source RTP directly.
+func ffmpegRTPCmd(in string, rtpPort int) *exec.Cmd {
+	args := []string{"-hide_banner", "-loglevel", "error"}
+	args = append(args, ffmpegNet(in)...)
+	args = append(args, ffmpegFastInput()...)
+	args = append(args, "-i", in, "-map", "0:v", "-an", "-c:v", "copy",
 		"-f", "rtp", fmt.Sprintf("rtp://127.0.0.1:%d", rtpPort))
 	return exec.Command("ffmpeg", args...)
 }

@@ -1,9 +1,7 @@
-// webrtc.go is the WebRTC lane beside HLS. Both lanes leave the single
-// session ffmpeg started by stream-start: HLS to disk, RTP to localhost,
-// where this hub relays packets into a shared pion track fanned out to all
-// viewers. AI boxes stay a canvas overlay (same overlay endpoint, small
-// lag), so no per-viewer work exists. Signaling (offer/answer) is the only
-// per-viewer exchange browsers allow; streaming itself needs no extra call.
+// webrtc.go is the low-delay lane. Multicast video RTP is written straight
+// into a shared pion track (sniff.fanout). ffmpeg is not on that path.
+// RTSP (or a failed multicast join) still remuxes copy-RTP via pumpRTP.
+// AI boxes stay a canvas overlay. Signaling is the only per-viewer call.
 package stream
 
 import (
@@ -130,18 +128,9 @@ func (s *session) stopRTCLocked() {
 	}
 }
 
-// pumpRTP relays ffmpeg's RTP output into the shared pion track. A dead or
-// wedged ingest kills the session ffmpeg so the supervisor restarts both
-// lanes together; normal shutdown returns quietly.
+// pumpRTP relays an ffmpeg RTP remux into the shared pion track (RTSP
+// fallback only). A dead ingest kills that ffmpeg so rtcRemux restarts it.
 func (s *session) pumpRTP(my int, conn net.PacketConn, track *webrtc.TrackLocalStaticRTP) {
-	defer func() {
-		mu.Lock()
-		proc := s.proc
-		mu.Unlock()
-		if proc != nil {
-			_ = proc.Kill()
-		}
-	}()
 	buf := make([]byte, 8192)
 	for {
 		if !s.alive(my) {

@@ -56,7 +56,7 @@ func (s *session) sniff(my int, mc *net.UDPConn, relay int) {
 			return
 		}
 		if s.handlePacket(buf[:n], &fu) {
-			_, _ = out.Write(buf[:n])
+			s.fanout(buf[:n], out)
 		}
 	}
 }
@@ -92,6 +92,21 @@ func (s *session) handlePacket(pkt []byte, fu *[]byte) bool {
 		}
 	}
 	return true
+}
+
+// fanout sends one video RTP packet to the active lane only.
+// WebRTC gets the source packet (no ffmpeg). HLS still needs the
+// localhost relay so copy-mode ffmpeg can remux TS.
+func (s *session) fanout(pkt []byte, relay *net.UDPConn) {
+	mu.Lock()
+	out, hub := s.out, s.rtcHub
+	mu.Unlock()
+	if out == 7 && hub != nil {
+		_, _ = hub.track.Write(pkt)
+	}
+	if out == 6 && relay != nil {
+		_, _ = relay.Write(pkt)
+	}
 }
 
 // learnParams harvests H264 SPS/PPS from the live NALs (single or STAP-A)

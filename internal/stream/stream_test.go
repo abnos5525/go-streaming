@@ -213,11 +213,14 @@ func TestLowLatencyDefaults(t *testing.T) {
 	if hlsSegTime() != 1 || hlsSegList() != 4 || aiDelayMS() != 4000 {
 		t.Fatalf("want 1s x 4 = 4000ms, got %g x %d = %d", hlsSegTime(), hlsSegList(), aiDelayMS())
 	}
-	s := strings.Join(ffmpegCmd("in", "out", 23456).Args, " ")
+	s := strings.Join(ffmpegHLSCmd("in", "out").Args, " ")
 	for _, want := range []string{"nobuffer", "low_delay", "-hls_time", "1", "-hls_list_size", "4", "independent_segments"} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("ffmpeg cmd missing %q: %s", want, s)
 		}
+	}
+	if strings.Contains(s, "rtp://") {
+		t.Fatal("HLS lane must not remux RTP")
 	}
 }
 
@@ -226,6 +229,20 @@ func TestMetaOutputType(t *testing.T) {
 	if s.metaLag(0).OutputType != 7 {
 		t.Fatal("want output_type 7 on meta")
 	}
+}
+
+func TestFanoutActiveLane(t *testing.T) {
+	s := &session{out: 6}
+	s.fanout([]byte{0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, nil)
+	hub, err := newRTCHub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.rtcHub = hub
+	s.out = 7
+	pkt := make([]byte, 12)
+	pkt[0] = 0x80
+	s.fanout(pkt, nil)
 }
 
 func TestStartSwitchesOutputType(t *testing.T) {
