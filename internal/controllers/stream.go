@@ -101,7 +101,7 @@ setInterval(fetchOv, 100); fetchOv(); requestAnimationFrame(drawBoxes);
 }
 `
 
-const playerCSS = `body{margin:0;background:#000;color:#0f0;font:12px sans-serif}.wrap{position:relative}video{width:100%;display:block;background:#000}canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}.tag{position:absolute;top:8px;left:8px;background:#0f0;color:#000;padding:2px 6px}`
+const playerCSS = `html,body{margin:0;height:100%;overflow:hidden;background:#000;color:#0f0;font:12px sans-serif}body{display:flex;align-items:center;justify-content:center}.wrap{position:relative;max-width:100vw;max-height:100vh}video{display:block;max-width:100vw;max-height:100vh;width:auto;height:auto;background:#000}canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}.tag{position:absolute;top:8px;left:8px;background:#0f0;color:#000;padding:2px 6px}`
 
 func watchPage(id string, outputType int) string {
 	if outputType == 7 {

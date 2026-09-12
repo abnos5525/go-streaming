@@ -18,6 +18,9 @@ func TestPlayerPagesAreSingleLane(t *testing.T) {
 	if !strings.Contains(trackerJS, "requestVideoFrameCallback") || !strings.Contains(rtc, "_gotFrame") {
 		t.Fatal("WebRTC overlay must wait for a painted frame before delay")
 	}
+	if !strings.Contains(playerCSS, "overflow:hidden") || !strings.Contains(playerCSS, "max-height:100vh") {
+		t.Fatal("player must fit the viewport without scroll")
+	}
 }
 
 func TestOutPath(t *testing.T) {
