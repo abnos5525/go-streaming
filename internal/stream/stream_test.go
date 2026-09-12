@@ -248,6 +248,27 @@ func TestMetaOutputType(t *testing.T) {
 	}
 }
 
+func TestStartSwitchesOutputType(t *testing.T) {
+	u := "udp://224.2.0.1:59999"
+	s := &session{url: u, id: idFor(u), running: true, out: 7}
+	mu.Lock()
+	sessions[u] = s
+	mu.Unlock()
+	t.Cleanup(func() {
+		mu.Lock()
+		delete(sessions, u)
+		mu.Unlock()
+	})
+	m, err := Start(u, 6)
+	if err != nil || m.OutputType != 6 {
+		t.Fatalf("want switch to 6, got %+v %v", m, err)
+	}
+	m, err = Start(u, 7)
+	if err != nil || m.OutputType != 7 {
+		t.Fatalf("want switch to 7, got %+v %v", m, err)
+	}
+}
+
 func TestLaneLagFresh(t *testing.T) {
 	id := "dddddddddddddddd"
 	if err := os.MkdirAll(filepath.Join(dir, id), 0o755); err != nil {

@@ -206,6 +206,7 @@ func Start(url string, outputType int) (Meta, error) {
 	}
 	mu.Lock()
 	if s, ok := sessions[url]; ok && s.running {
+		s.out = outputType
 		mu.Unlock()
 		return s.meta(), nil
 	}
