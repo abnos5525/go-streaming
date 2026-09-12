@@ -1,0 +1,7 @@
+.git
+.cursor
+hls
+hello.exe
+*.log
+.env
+docs

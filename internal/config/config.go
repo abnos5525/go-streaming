@@ -2,8 +2,10 @@ package config
 
 import (
 	"crypto/tls"
+	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -22,18 +24,21 @@ var (
 
 func Load() {
 	_ = godotenv.Load()
-	HafezBase, HafezUser, HafezPass = must("HAFEZ_BASEURL"), must("HAFEZ_USERNAME"), must("HAFEZ_PASSWORD")
-	Issuer, Realm, ClientID, Secret = must("AUTH_URL"), must("AUTH_REALM"), must("AUTH_CLIENTID"), must("AUTH_SECRET_CODE")
+	var miss []string
+	get := func(k string) string {
+		v := os.Getenv(k)
+		if v == "" {
+			miss = append(miss, k)
+		}
+		return v
+	}
+	HafezBase, HafezUser, HafezPass = get("HAFEZ_BASEURL"), get("HAFEZ_USERNAME"), get("HAFEZ_PASSWORD")
+	Issuer, Realm, ClientID, Secret = get("AUTH_URL"), get("AUTH_REALM"), get("AUTH_CLIENTID"), get("AUTH_SECRET_CODE")
+	if len(miss) > 0 {
+		log.Printf("env missing %s — auth/hafez off, stream still runs", strings.Join(miss, ", "))
+	}
 }
 
 func TokenURL() string {
 	return Issuer + "realms/" + Realm + "/protocol/openid-connect/token"
-}
-
-func must(k string) string {
-	v := os.Getenv(k)
-	if v == "" {
-		panic("missing env " + k)
-	}
-	return v
 }
