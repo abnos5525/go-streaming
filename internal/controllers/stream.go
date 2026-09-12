@@ -42,13 +42,16 @@ function playerLagMS(el, hls) {
   } catch (e) {}
   return null;
 }
+function videoReady(el) {
+  return el && el.readyState >= 2 && el.videoWidth > 0 && el.videoHeight > 0;
+}
 function startTracker(vId, cId, ovURL, lagFn) {
 const v = document.getElementById(vId), c = document.getElementById(cId), x = c.getContext('2d');
 let ovCur = null;
 function fit() { c.width = v.clientWidth; c.height = v.clientHeight; }
 addEventListener('resize', fit); v.addEventListener('loadedmetadata', fit); v.addEventListener('play', fit);
 async function fetchOv() {
-  if (c.style.display === 'none') return;
+  if (c.style.display === 'none' || !videoReady(v)) return;
   try {
     let url = ovURL;
     const lag = typeof lagFn === 'function' ? lagFn() : null;
@@ -61,7 +64,7 @@ function drawBoxes() {
   if (c.style.display === 'none') return;
   fit();
   x.clearRect(0, 0, c.width, c.height);
-  if (!ovCur || !ovCur.boxes || !ovCur.boxes.length) return;
+  if (!videoReady(v) || !ovCur || !ovCur.boxes || !ovCur.boxes.length) return;
   const rw = ovCur.width || v.videoWidth || c.width, rh = ovCur.height || v.videoHeight || c.height;
   const sx = c.width / rw, sy = c.height / rh;
   x.lineWidth = 2; x.font = '14px sans-serif';
@@ -496,6 +499,7 @@ function drawCues() {
   requestAnimationFrame(drawCues);
   fit();
   x.clearRect(0, 0, c.width, c.height);
+  if (!v.videoWidth || v.readyState < 2) return;
   const now = mediaNow();
   if (now < 0 || !cues.length) return;
   let k = cues.length - 1;
