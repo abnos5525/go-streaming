@@ -3,15 +3,13 @@ package stream
 import (
 	"encoding/binary"
 	"encoding/json"
-	"fmt"
 	"io"
-	"log"
 	"os/exec"
 )
 
 // Minimum-delay lane: fragmented MP4 over plain HTTP + browser MSE.
 // No segments on the wire (the tick source in HLS), no new dependencies:
-// one ffmpeg copy-remux per viewed session, fanned out to many viewers.
+// one gstreamer remux per viewed session, fanned out to many viewers.
 //
 // Browser MSE needs ftyp+moov (init) before any media, so the relay caches
 // it and replays it to late joiners.
@@ -23,33 +21,13 @@ import (
 // any parse failure degrades to plain forwarding.
 
 const (
-	mp4Chunk   = 32 << 10
-	mp4SubBuf  = 256
-	mp4FragUS  = 500000 // 0.5s fragments
-	mp4Probe   = 262144
-	mp4Analyze = 250000
+	mp4Chunk  = 32 << 10
+	mp4SubBuf = 256
 )
 
 type mp4Hub struct {
 	init []byte
 	subs map[chan []byte]struct{}
-}
-
-func ffmpegMP4Cmd(in string) *exec.Cmd {
-	args := []string{"-hide_banner", "-loglevel", "error"}
-	args = append(args, ffmpegNet(in)...)
-	args = append(args,
-		"-fflags", "nobuffer", "-flags", "low_delay",
-		"-probesize", fmt.Sprintf("%d", mp4Probe),
-		"-analyzeduration", fmt.Sprintf("%d", mp4Analyze),
-		"-i", in,
-		"-an",
-		"-c:v", "copy",
-		"-movflags", "empty_moov+omit_tfhd_offset+frag_keyframe+default_base_moof",
-		"-frag_duration", fmt.Sprintf("%d", mp4FragUS),
-		"-f", "mp4", "pipe:1",
-	)
-	return exec.Command("ffmpeg", args...)
 }
 
 // splitBox returns the first complete top-level box and the rest.
@@ -234,7 +212,7 @@ func unsubscribeMP4(id string, c chan []byte) {
 }
 
 func (s *session) startMP4Locked() error {
-	cmd := ffmpegMP4Cmd(ffmpegInput(s.url))
+	cmd := gstMP4Cmd(muxInput(s.url))
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -251,10 +229,17 @@ func (s *session) startMP4Locked() error {
 
 func (s *session) stopMP4Locked() {
 	if s.mp4Proc != nil {
-		_ = s.mp4Proc.Kill()
+		proc := s.mp4Proc
 		s.mp4Proc = nil
+		_ = proc.Kill()
+		go proc.Wait() // reap outside mu; Kill without Wait leaks zombies on Windows
 	}
-	s.mp4Hub = nil
+	if h := s.mp4Hub; h != nil {
+		for c := range h.subs {
+			close(c)
+		}
+		s.mp4Hub = nil
+	}
 }
 
 func (s *session) relayMP4(out io.Reader, cmd *exec.Cmd) {
@@ -328,11 +313,10 @@ func (s *session) relayMP4(out io.Reader, cmd *exec.Cmd) {
 					}
 					pending = append(pending, partial...)
 				} else if len(pending) > 4<<20 {
-					log.Printf("mp4 %s: no init in 4MB, restarting remux", s.id)
+					logStream("WARN", s.id, s.url, "mp4: no init in 4MB — restarting remux")
 					mu.Lock()
 					s.stopMP4Locked()
 					mu.Unlock()
-					_ = cmd.Process.Kill()
 					return
 				}
 			} else {
@@ -342,11 +326,10 @@ func (s *session) relayMP4(out io.Reader, cmd *exec.Cmd) {
 					emit(bx)
 				}
 				if len(pending) > 8<<20 {
-					log.Printf("mp4 %s: no box boundary in 8MB, restarting remux", s.id)
+					logStream("WARN", s.id, s.url, "mp4: no box boundary in 8MB — restarting remux")
 					mu.Lock()
 					s.stopMP4Locked()
 					mu.Unlock()
-					_ = cmd.Process.Kill()
 					return
 				}
 			}
@@ -354,16 +337,11 @@ func (s *session) relayMP4(out io.Reader, cmd *exec.Cmd) {
 		if err != nil {
 			_ = cmd.Wait()
 			mu.Lock()
-			h := s.mp4Hub
+			s.mp4Proc = nil // already reaped
 			s.stopMP4Locked()
-			if h != nil {
-				for c := range h.subs {
-					close(c)
-				}
-			}
 			mu.Unlock()
 			if err != io.EOF {
-				log.Printf("mp4 %s: %v", s.id, err)
+				logStream("ERROR", s.id, s.url, "mp4 remux: %v", err)
 			}
 			return
 		}

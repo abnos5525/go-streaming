@@ -1,10 +1,11 @@
 package rtp
 
 import (
+	"net"
 	"strings"
 	"testing"
 
-	"project1/internal/stream/ai"
+	"github.com/abnos5525/go-streaming/internal/stream/ai"
 )
 
 func TestSDP(t *testing.T) {
@@ -81,4 +82,39 @@ func TestNALShapes(t *testing.T) {
 	if nals := NALs(sei, &fu); len(nals) != 1 || ai.FromNAL(nals[0]) == nil {
 		t.Fatal("single nal")
 	}
+}
+
+func TestUnpackVideo(t *testing.T) {
+	var fu []byte
+	idr := []byte{0x65, 0x88, 0x00}
+	if nals := Unpack(idr, &fu); len(nals) != 1 || nals[0][0] != 0x65 {
+		t.Fatal(nals)
+	}
+	if Unpack([]byte{0x61, 0x9A}, &fu) == nil {
+		t.Fatal("slice")
+	}
+	// FU-A of an IDR: start + end.
+	full := []byte{0x65, 0x11, 0x22, 0x33}
+	start := []byte{0x7C, 0x85, 0x11, 0x22}
+	end := []byte{0x7C, 0x45, 0x33}
+	if Unpack(start, &fu) != nil {
+		t.Fatal("start must wait")
+	}
+	got := Unpack(end, &fu)
+	if len(got) != 1 || string(got[0]) != string(full) {
+		t.Fatalf("fu-a %x", got)
+	}
+}
+
+func TestMcastIfacesSkipLoopback(t *testing.T) {
+	for _, ifi := range mcastIfaces() {
+		if ifi.Flags&net.FlagLoopback != 0 {
+			t.Fatalf("loopback %s", ifi.Name)
+		}
+	}
+}
+
+func TestRejoinNil(t *testing.T) {
+	Rejoin(nil, nil)
+	Rejoin(nil, net.IPv4(224, 2, 0, 1))
 }

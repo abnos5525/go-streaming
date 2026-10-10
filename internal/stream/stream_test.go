@@ -8,8 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"project1/internal/stream/ai"
-	"project1/internal/stream/rtp"
+	"github.com/abnos5525/go-streaming/internal/protocols/hls"
+	"github.com/abnos5525/go-streaming/internal/protocols/rtp"
+	rtc "github.com/abnos5525/go-streaming/internal/protocols/webrtc"
+	"github.com/abnos5525/go-streaming/internal/stream/ai"
 )
 
 func TestStopNotRunning(t *testing.T) {
@@ -37,8 +39,26 @@ func TestIDPerURL(t *testing.T) {
 	}
 }
 
-func TestFFmpegInputMulticast(t *testing.T) {
-	got := ffmpegInput("udp://224.2.0.1:5484")
+func TestResolveUDPStripsRestreamPath(t *testing.T) {
+	fe := "udp://224.2.0.1:5221/restream/171395c3-a6f9-44c5-b7fd-c2cbbc2c3393_720"
+	a, err := resolve(fe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := resolve("udp://224.2.0.1:5221")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a != b || a != "udp://224.2.0.1:5221" {
+		t.Fatalf("got %q %q", a, b)
+	}
+	if idFor(a) == idFor("udp://224.2.0.1:5620") {
+		t.Fatal("different groups must not collapse")
+	}
+}
+
+func TestMuxInputMulticast(t *testing.T) {
+	got := muxInput("udp://224.2.0.1:5484")
 	if !strings.Contains(got, "reuse=1") {
 		t.Fatal(got)
 	}
@@ -59,16 +79,16 @@ func TestLearnParams(t *testing.T) {
 	}
 	s := &session{id: id}
 	sps, pps := []byte{0x67, 0x4D, 0x00, 0x1E}, []byte{0x68, 0xEE, 0x3C}
-	// Single NALs.
-	s.learnParams([][]byte{sps, pps})
-	if s.spsB64 == "" || s.ppsB64 == "" {
+	// Single NALs (as Unpack returns).
+	s.learnVideoParams([][]byte{sps, pps})
+	if s.spsB64 == "" || s.ppsB64 == "" || s.spsNAL == nil || s.ppsNAL == nil {
 		t.Fatal("params not learned")
 	}
 	b, _ := os.ReadFile(filepath.Join(dir, id, "in.sdp"))
 	if !strings.Contains(string(b), "sprop-parameter-sets="+s.spsB64+","+s.ppsB64) {
 		t.Fatalf("sdp not stamped: %s", b)
 	}
-	// STAP-A aggregation also yields params on a fresh session.
+	// STAP-A via Unpack also yields params on a fresh session.
 	s2 := &session{id: id}
 	aggr := []byte{24}
 	add := func(n []byte) {
@@ -78,8 +98,9 @@ func TestLearnParams(t *testing.T) {
 	add(sps)
 	add(pps)
 	add([]byte{0x65, 0x01, 0x02})
-	s2.learnParams([][]byte{aggr})
-	if s2.spsB64 == "" || s2.ppsB64 == "" {
+	var fu []byte
+	s2.learnVideoParams(rtp.Unpack(aggr, &fu))
+	if s2.spsB64 == "" || s2.ppsB64 == "" || s2.spsNAL == nil || s2.ppsNAL == nil {
 		t.Fatal("stap-a params not learned")
 	}
 }
@@ -103,12 +124,15 @@ func TestTailErr(t *testing.T) {
 	}
 }
 
-func TestTracksFromProbe(t *testing.T) {
-	got := tracksFromProbe([]byte(`{"streams":[
-		{"codec_type":"video","codec_name":"h264","width":1920,"height":1080,"r_frame_rate":"25/1","tags":{"handler_name":"Video"}},
-		{"codec_type":"data","codec_name":"bin_data"}
-	]}`))
-	if len(got) != 2 || got[0].Width != 1920 || got[0].Handler != "Video" || got[1].Type != "data" {
+func TestTracksFromDiscoverer(t *testing.T) {
+	got := tracksFromDiscoverer([]byte(`
+		video: H.264 (High Profile)
+		  Width: 1920
+		  Height: 1080
+		  Frame rate: 25/1
+		audio: MPEG-4 AAC
+	`))
+	if len(got) != 2 || got[0].Width != 1920 || got[0].Height != 1080 || got[0].FPS != "25/1" || got[1].Type != "audio" {
 		t.Fatal(got)
 	}
 }
@@ -138,6 +162,57 @@ func TestDelayedAI(t *testing.T) {
 	s.pushAI(same, 1000500)
 	if s.buf[len(s.buf)-1].TypeMessage != 6 || s.arr[len(s.arr)-1] != 1000500 {
 		t.Fatal("same timestamp not replaced")
+	}
+}
+
+func TestPushAIHeartbeatKeepsHits(t *testing.T) {
+	s := &session{}
+	hit := &ai.AIFrame{}
+	hit.Frame.Timestamp = 0
+	hit.Results = []ai.AIResult{{Objects: []ai.AIObject{{Name: "person", BBox: ai.BBox{X: 1, Y: 2, Width: 3, Height: 4}}}}}
+	s.pushAI(hit, 1)
+	beat := &ai.AIFrame{}
+	beat.Frame.Timestamp = 0
+	beat.Camera.ID = "cam"
+	s.pushAI(beat, 2)
+	o := overlayFromMeta("id", Meta{AI: s.delayedAI(0)})
+	if len(o.Boxes) != 1 || o.Boxes[0].Label != "person" {
+		t.Fatalf("heartbeat wiped boxes: %+v", o)
+	}
+}
+
+func TestPushAIHeartbeatLaterKeepsHits(t *testing.T) {
+	s := &session{}
+	hit := &ai.AIFrame{}
+	hit.Frame.Timestamp = 1000
+	hit.Results = []ai.AIResult{{Objects: []ai.AIObject{{Name: "person", BBox: ai.BBox{X: 1, Y: 2, Width: 3, Height: 4}}}}}
+	s.pushAI(hit, 1)
+	beat := &ai.AIFrame{}
+	beat.Frame.Timestamp = 1100
+	beat.Camera.ID = "cam"
+	s.pushAI(beat, 2)
+	if len(s.buf) != 1 || s.buf[0].Frame.Timestamp != 1000 {
+		t.Fatalf("later heartbeat became a sample: %d", len(s.buf))
+	}
+	o := overlayFromMeta("id", Meta{AI: s.delayedAI(0)})
+	if len(o.Boxes) != 1 {
+		t.Fatalf("later heartbeat vanished boxes: %+v", o)
+	}
+	gop := &ai.AIFrame{}
+	gop.Frame.Timestamp = 3000
+	gop.Results = []ai.AIResult{{Model: "det", Objects: nil}}
+	s.pushAI(gop, 3)
+	o = overlayFromMeta("id", Meta{AI: s.delayedAI(0)})
+	if len(o.Boxes) != 1 {
+		t.Fatalf("GOP empty SEI blinked boxes: %+v", o)
+	}
+	clear := &ai.AIFrame{}
+	clear.Frame.Timestamp = 4000
+	clear.Results = []ai.AIResult{{Model: "det", Objects: nil}}
+	s.pushAI(clear, 4)
+	o = overlayFromMeta("id", Meta{AI: s.delayedAI(0)})
+	if len(o.Boxes) != 0 {
+		t.Fatalf("empty 2.5s after last hit must clear: %+v", o)
 	}
 }
 
@@ -210,74 +285,152 @@ func TestDelayedAIOffset(t *testing.T) {
 func TestLowLatencyDefaults(t *testing.T) {
 	t.Setenv("HLS_TIME", "")
 	t.Setenv("HLS_LIST_SIZE", "")
-	if hlsSegTime() != 1 || hlsSegList() != 4 || aiDelayMS() != 4000 {
-		t.Fatalf("want 1s x 4 = 4000ms, got %g x %d = %d", hlsSegTime(), hlsSegList(), aiDelayMS())
-	}
-	s := strings.Join(ffmpegHLSCmd("in", "out").Args, " ")
-	for _, want := range []string{"nobuffer", "low_delay", "-hls_time", "1", "-hls_list_size", "4", "independent_segments"} {
-		if !strings.Contains(s, want) {
-			t.Fatalf("ffmpeg cmd missing %q: %s", want, s)
-		}
-	}
-	if strings.Contains(s, "rtp://") {
-		t.Fatal("HLS lane must not remux RTP")
+	if hlsSegTime() != 1 || hlsSegList() != 7 || aiDelayMS() != 600 || hls.PartMin != 200*time.Millisecond {
+		t.Fatalf("want 1s / 7 segs / 600ms hold / 200ms parts, got %g x %d = %d part=%s", hlsSegTime(), hlsSegList(), aiDelayMS(), hls.PartMin)
 	}
 }
 
 func TestMetaOutputType(t *testing.T) {
-	s := &session{id: "ffffffffffffffff", out: 7, running: true}
-	if s.metaLag(0).OutputType != 7 {
-		t.Fatal("want output_type 7 on meta")
+	s := &session{id: "ffffffffffffffff", out: 7, running: true, rtcHub: &rtc.Hub{}}
+	m := s.metaLag(0)
+	if m.OutputType != 7 || !m.Ready || m.URL != "/webrtc/ffffffffffffffff/offer" {
+		t.Fatalf("webrtc meta: %+v", m)
+	}
+	h := &session{id: "ffffffffffffffff", out: 6, running: true}
+	m = h.metaLag(0)
+	if m.Ready || m.URL != "/hls/ffffffffffffffff/index.m3u8" {
+		t.Fatalf("hls meta until first IDR: %+v", m)
 	}
 }
 
-func TestFanoutActiveLane(t *testing.T) {
+func TestFanoutBothLanes(t *testing.T) {
 	s := &session{out: 6}
 	s.fanout([]byte{0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, nil)
-	hub, err := newRTCHub()
+	hub, err := rtc.NewHub(s.h264Cap())
 	if err != nil {
 		t.Fatal(err)
 	}
 	s.rtcHub = hub
-	s.out = 7
-	pkt := make([]byte, 12)
-	pkt[0] = 0x80
+	s.out = 6
+	pkt := make([]byte, 14)
+	pkt[0], pkt[1], pkt[12] = 0x80, 96, 0x61
 	s.fanout(pkt, nil)
+	if hub.Seq() != 1 {
+		t.Fatalf("WebRTC must keep RTP while HLS is the latest type, seq=%d", hub.Seq())
+	}
 }
 
-func TestStartSwitchesOutputType(t *testing.T) {
+func TestFanoutDoesNotBlockOnHLS(t *testing.T) {
+	s := &session{llCh: make(chan []byte)}
+	hub, err := rtc.NewHub(s.h264Cap())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.rtcHub = hub
+	pkt := make([]byte, 14)
+	pkt[0], pkt[1], pkt[12] = 0x80, 96, 0x61
+	done := make(chan struct{})
+	go func() {
+		s.fanout(pkt, nil)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("fanout blocked on HLS")
+	}
+	if hub.Seq() != 1 {
+		t.Fatalf("WebRTC must keep RTP when HLS queue is stuck, seq=%d", hub.Seq())
+	}
+	if !s.llNeedIDR.Load() {
+		t.Fatal("llCh drop must set llNeedIDR")
+	}
+}
+
+func TestFanoutAfterDetachLL(t *testing.T) {
+	s := &session{id: "ffffffffffffffff"}
+	mu.Lock()
+	s.llCh = make(chan []byte, 1)
+	_ = s.detachLLLocked()
+	mu.Unlock()
+	pkt := make([]byte, 14)
+	pkt[0], pkt[1], pkt[12] = 0x80, 96, 0x61
+	s.fanout(pkt, nil) // must not panic on closed/nil llCh
+}
+
+func TestStartKeepsBothLanes(t *testing.T) {
 	u := "udp://224.2.0.1:59999"
-	s := &session{url: u, id: idFor(u), running: true, out: 7}
+	s := &session{
+		url: u, id: idFor(u), running: true, out: 7,
+		spsNAL: []byte{0x67, 0x4d, 0x00, 0x29, 0xaa},
+		ppsNAL: []byte{0x68, 0xee, 0x3c, 0x80},
+	}
 	mu.Lock()
 	sessions[u] = s
 	mu.Unlock()
 	t.Cleanup(func() {
 		mu.Lock()
+		if s.ll != nil {
+			s.stopLLLocked()
+		}
+		if s.rtcHub != nil {
+			s.stopRTCLocked()
+		}
 		delete(sessions, u)
 		mu.Unlock()
 	})
 	m, err := Start(u, 6)
-	if err != nil || m.OutputType != 6 {
-		t.Fatalf("want switch to 6, got %+v %v", m, err)
+	if err != nil || m.OutputType != 6 || s.ll == nil {
+		t.Fatalf("want HLS lane, got %+v %v ll=%v", m, err, s.ll)
 	}
 	m, err = Start(u, 7)
-	if err != nil || m.OutputType != 7 {
-		t.Fatalf("want switch to 7, got %+v %v", m, err)
+	if err != nil || m.OutputType != 7 || s.ll == nil || s.rtcHub == nil {
+		t.Fatalf("webrtc start must not drop HLS, got %+v %v ll=%v rtc=%v", m, err, s.ll, s.rtcHub)
+	}
+	m, err = Start(u, 6)
+	if err != nil || s.ll == nil || s.rtcHub == nil {
+		t.Fatalf("hls start must not drop WebRTC, got %+v %v ll=%v rtc=%v", m, err, s.ll, s.rtcHub)
+	}
+}
+
+func TestStartRestreamSharesSession(t *testing.T) {
+	fe := "udp://224.2.0.1:5221/restream/171395c3-a6f9-44c5-b7fd-c2cbbc2c3393_720"
+	key, err := resolve(fe)
+	if err != nil || key != "udp://224.2.0.1:5221" {
+		t.Fatalf("resolve: %q %v", key, err)
+	}
+	s := &session{
+		url: key, id: idFor(key), running: true, out: 6,
+		spsNAL: []byte{0x67, 0x4d, 0x00, 0x29, 0xaa},
+		ppsNAL: []byte{0x68, 0xee, 0x3c, 0x80},
+	}
+	mu.Lock()
+	sessions[key] = s
+	mu.Unlock()
+	t.Cleanup(func() {
+		mu.Lock()
+		if s.ll != nil {
+			s.stopLLLocked()
+		}
+		if s.rtcHub != nil {
+			s.stopRTCLocked()
+		}
+		delete(sessions, key)
+		mu.Unlock()
+	})
+	m, err := Start(fe, 7)
+	if err != nil || m.ID != s.id || s.rtcHub == nil {
+		t.Fatalf("frontend restream url must reuse session, got %+v %v", m, err)
+	}
+	m2, err := Start(key, 6)
+	if err != nil || m2.ID != s.id || s.ll == nil || s.rtcHub == nil {
+		t.Fatalf("clean url must be the same session, got %+v %v", m2, err)
 	}
 }
 
 func TestLaneLagFresh(t *testing.T) {
-	id := "dddddddddddddddd"
-	if err := os.MkdirAll(filepath.Join(dir, id), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(filepath.Join(dir, id))
-	pl := "#EXTM3U\n#EXTINF:1.0,\na.ts\n#EXTINF:1.0,\nb.ts\n#EXTINF:1.0,\nc.ts\n"
-	if err := os.WriteFile(filepath.Join(dir, id, "index.m3u8"), []byte(pl), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if got := (&session{id: id}).laneLag(); got != 2000 {
-		t.Fatalf("copy lane: want 2000, got %d", got)
+	if got := (&session{}).laneLag(); got != 600 {
+		t.Fatalf("LL-HLS hold-back fallback: want 600, got %d", got)
 	}
 }
 
@@ -332,5 +485,69 @@ func TestHoldMotionSim(t *testing.T) {
 	shown := got.Results[0].Objects[0].BBox.X
 	if d := float64(base+2150-base)/10 - shown; d < 0 || d > 50 {
 		t.Fatalf("box trails by %.0fpx, want 0..50", d)
+	}
+}
+
+func TestStopLeavesOtherSession(t *testing.T) {
+	aURL := "udp://224.2.0.1:59990"
+	bURL := "udp://224.2.0.1:59991"
+	a := &session{url: aURL, id: idFor(aURL), running: true, gen: 1, out: 7}
+	b := &session{url: bURL, id: idFor(bURL), running: true, gen: 1, out: 7}
+	hub, err := rtc.NewHub(b.h264Cap())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.rtcHub = hub
+	mu.Lock()
+	sessions[aURL] = a
+	sessions[bURL] = b
+	mu.Unlock()
+	t.Cleanup(func() {
+		mu.Lock()
+		delete(sessions, aURL)
+		delete(sessions, bURL)
+		if b.rtcHub != nil {
+			b.stopRTCLocked()
+		}
+		if a.rtcHub != nil {
+			a.stopRTCLocked()
+		}
+		mu.Unlock()
+	})
+	if err := Stop(aURL); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if _, ok := sessions[aURL]; ok {
+		t.Fatal("stopped url still in map")
+	}
+	if sessions[bURL] != b || !b.running || b.rtcHub == nil {
+		t.Fatal("sibling session must survive Stop of another URL")
+	}
+}
+
+func TestSiblingSocketsSameGroup(t *testing.T) {
+	ip := mcastIP("udp://224.2.0.1:5217")
+	if ip == nil || ip.String() != "224.2.0.1" {
+		t.Fatalf("mcastIP %v", ip)
+	}
+	if mcastIP("rtsp://cam/1") != nil {
+		t.Fatal("rtsp is not a multicast group")
+	}
+	a := &session{url: "udp://224.2.0.1:5217"}
+	b := &session{url: "udp://224.2.0.1:5160"}
+	c := &session{url: "udp://224.2.0.2:5217"}
+	mu.Lock()
+	sessions["a"] = a
+	sessions["b"] = b
+	sessions["c"] = c
+	got := siblingSockets(ip, nil)
+	delete(sessions, "a")
+	delete(sessions, "b")
+	delete(sessions, "c")
+	mu.Unlock()
+	if len(got) != 0 {
+		t.Fatalf("nil sockets must not be listed, got %d", len(got))
 	}
 }

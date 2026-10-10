@@ -2,8 +2,6 @@ package swagger
 
 import (
 	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -11,7 +9,6 @@ import (
 	"github.com/swaggest/openapi-go/openapi3"
 	"github.com/swaggest/swgui"
 	"github.com/swaggest/swgui/v5emb"
-	"project1/internal/config"
 )
 
 type helloResponse struct {
@@ -40,17 +37,6 @@ type streamID struct {
 	ID string `path:"id"`
 }
 
-type rtcOfferIn struct {
-	ID   string `path:"id"`
-	SDP  string `json:"sdp"`
-	Type string `json:"type"`
-}
-
-type rtcAnswerOut struct {
-	SDP  string `json:"sdp"`
-	Type string `json:"type"`
-}
-
 type streamTrack struct {
 	Type    string `json:"type"`
 	Codec   string `json:"codec"`
@@ -70,57 +56,21 @@ type streamMeta struct {
 	Tracks     []streamTrack `json:"tracks,omitempty"`
 	RTP        uint32        `json:"rtp,omitempty"`
 	AI         any           `json:"ai,omitempty"`
+	SEI        any           `json:"sei,omitempty"`
 	AIAgeMS    int64         `json:"ai_age_ms,omitempty"`
 	AIFPS      float64       `json:"ai_fps,omitempty"`
 	OutputType int           `json:"output_type,omitempty"`
 }
 
-type streamBox struct {
-	X          float64 `json:"x"`
-	Y          float64 `json:"y"`
-	W          float64 `json:"w"`
-	H          float64 `json:"h"`
-	Label      string  `json:"label"`
-	Confidence float64 `json:"confidence,omitempty"`
-}
-
-type streamOverlay struct {
-	ID        string      `json:"id"`
-	Timestamp int64       `json:"timestamp"`
-	Width     int         `json:"width,omitempty"`
-	Height    int         `json:"height,omitempty"`
-	Boxes     []streamBox `json:"boxes"`
-}
-
 func spec() []byte {
 	r := openapi3.NewReflector()
-	r.SpecEns().Info.WithTitle("project1").WithVersion("1.0.0")
-	r.SpecEns().SetHTTPBearerTokenSecurity("bearer-auth", "JWT", "JWT")
-	r.SpecEns().ComponentsEns().SecuritySchemesEns().WithMapOfSecuritySchemeOrRefValuesItem(
-		"keycloak-auth",
-		openapi3.SecuritySchemeOrRef{
-			SecurityScheme: (&openapi3.SecurityScheme{}).WithOAuth2SecurityScheme(
-				*(&openapi3.OAuth2SecurityScheme{}).WithFlows(
-					*(&openapi3.OAuthFlows{}).WithPassword(
-						*(&openapi3.PasswordOAuthFlow{}).
-							WithTokenURL("/oauth/token").
-							WithScopes(map[string]string{
-								"openid":  "OpenID Connect",
-								"profile": "Profile",
-								"email":   "Email",
-							}),
-					),
-				),
-			),
-		},
-	)
+	r.SpecEns().Info.WithTitle("go-streaming").WithVersion("0.1.0").
+		WithDescription("Low-latency multicast / RTSP ingest to Apple LL-HLS and WebRTC.")
 	op, err := r.NewOperationContext(http.MethodGet, "/")
 	if err != nil {
 		panic(err)
 	}
-	op.SetSummary("hello world")
-	op.AddSecurity("keycloak-auth", "openid", "profile", "email")
-	op.AddSecurity("bearer-auth")
+	op.SetSummary("health")
 	op.AddRespStructure(new(helloResponse), func(cu *openapi.ContentUnit) { cu.HTTPStatus = http.StatusOK })
 	if err := r.AddOperation(op); err != nil {
 		panic(err)
@@ -129,7 +79,7 @@ func spec() []byte {
 	if err != nil {
 		panic(err)
 	}
-	meta.SetSummary("HLS playlist status")
+	meta.SetSummary("List stream sessions")
 	meta.AddRespStructure(new([]streamMeta), func(cu *openapi.ContentUnit) { cu.HTTPStatus = http.StatusOK })
 	if err := r.AddOperation(meta); err != nil {
 		panic(err)
@@ -148,7 +98,7 @@ func spec() []byte {
 	if err != nil {
 		panic(err)
 	}
-	st.SetSummary("Start ingest; output_type 6 = HLS, 7 = WebRTC")
+	st.SetSummary("Start ingest; output_type 6 = LL-HLS, 7 = WebRTC")
 	st.AddReqStructure(new(streamStart))
 	st.AddRespStructure(new(streamURL), func(cu *openapi.ContentUnit) { cu.HTTPStatus = http.StatusOK })
 	if err := r.AddOperation(st); err != nil {
@@ -158,30 +108,10 @@ func spec() []byte {
 	if err != nil {
 		panic(err)
 	}
-	sp.SetSummary("Stop RTSP to HLS")
+	sp.SetSummary("Stop a stream by source URL")
 	sp.AddReqStructure(new(streamStop))
 	sp.AddRespStructure(new(streamMsg), func(cu *openapi.ContentUnit) { cu.HTTPStatus = http.StatusOK })
 	if err := r.AddOperation(sp); err != nil {
-		panic(err)
-	}
-	ov, err := r.NewOperationContext(http.MethodGet, "/stream/overlay/{id}")
-	if err != nil {
-		panic(err)
-	}
-	ov.SetSummary("Delay-compensated AI boxes for drawing")
-	ov.AddReqStructure(new(streamID))
-	ov.AddRespStructure(new(streamOverlay), func(cu *openapi.ContentUnit) { cu.HTTPStatus = http.StatusOK })
-	if err := r.AddOperation(ov); err != nil {
-		panic(err)
-	}
-	rtc, err := r.NewOperationContext(http.MethodPost, "/webrtc/{id}/offer")
-	if err != nil {
-		panic(err)
-	}
-	rtc.SetSummary("WebRTC viewer handshake (non-trickle offer/answer)")
-	rtc.AddReqStructure(new(rtcOfferIn))
-	rtc.AddRespStructure(new(rtcAnswerOut), func(cu *openapi.ContentUnit) { cu.HTTPStatus = http.StatusOK })
-	if err := r.AddOperation(rtc); err != nil {
 		panic(err)
 	}
 	b, err := json.Marshal(r.Spec)
@@ -191,62 +121,16 @@ func spec() []byte {
 	return b
 }
 
-func ui() http.Handler {
-	oauth, err := json.Marshal(map[string]string{
-		"clientId":     config.ClientID,
-		"clientSecret": config.Secret,
-		"realm":        config.Realm,
-		"appName":      "VMS API",
-		"scopes":       "openid profile email",
-	})
-	if err != nil {
-		panic(err)
-	}
-	return v5emb.NewHandlerWithConfig(swgui.Config{
-		Title:       "project1",
-		SwaggerJSON: "/openapi.json",
-		BasePath:    "/api/doc/",
-		SettingsUI: map[string]string{
-			"persistAuthorization": "true",
-			"onComplete":           fmt.Sprintf(`function(){setTimeout(function(){window.ui.initOAuth(%s)},0)}`, oauth),
-		},
-	})
-}
-
-func writeJSON(w http.ResponseWriter, code int, body string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	w.Write([]byte(body))
-}
-
-func tokenProxy(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		writeJSON(w, http.StatusBadRequest, `{"error":"invalid_request"}`)
-		return
-	}
-	r.PostForm.Set("client_id", config.ClientID)
-	r.PostForm.Set("client_secret", config.Secret)
-	if r.PostForm.Get("scope") == "" {
-		r.PostForm.Set("scope", "openid")
-	}
-	res, err := config.HTTP.PostForm(config.TokenURL(), r.PostForm)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, `{"error":"token_request_failed"}`)
-		return
-	}
-	defer res.Body.Close()
-	w.Header().Set("Content-Type", res.Header.Get("Content-Type"))
-	w.WriteHeader(res.StatusCode)
-	io.Copy(w, res.Body)
-}
-
 func Register(r *gin.Engine) {
 	doc := spec()
-	docs := ui()
+	docs := v5emb.NewHandlerWithConfig(swgui.Config{
+		Title:       "go-streaming",
+		SwaggerJSON: "/openapi.json",
+		BasePath:    "/api/doc/",
+	})
 	r.GET("/openapi.json", func(c *gin.Context) {
 		c.Data(http.StatusOK, "application/json", doc)
 	})
 	r.GET("/api/doc", func(c *gin.Context) { c.Redirect(http.StatusFound, "/api/doc/") })
 	r.Any("/api/doc/*path", gin.WrapH(docs))
-	r.POST("/oauth/token", gin.WrapF(tokenProxy))
 }

@@ -3,6 +3,7 @@ package stream
 import (
 	"fmt"
 	"testing"
+	"time"
 )
 
 func chainJS(ts int64) string {
@@ -27,9 +28,15 @@ func seiSingleNAL(js string) []byte {
 // video passthrough, single-NAL SEI, FU-A fragmented SEI, header-extension
 // JSON and raw JSON datagrams -> buffer -> overlay boxes.
 func TestHandlePacketChain(t *testing.T) {
-	s := &session{}
+	s := &session{running: true}
 	s.delayMS.Store(4000)
 	var fu []byte
+	t.Cleanup(func() {
+		mu.Lock()
+		s.running = false
+		s.stopAILocked()
+		mu.Unlock()
+	})
 
 	// 1. Plain video: forwarded, no AI.
 	if !s.handlePacket(append(rtpHead(96, 100), 0x61, 0x9A, 0xBC), &fu) {
@@ -39,9 +46,13 @@ func TestHandlePacketChain(t *testing.T) {
 		t.Fatalf("no AI expected, got %d", len(s.buf))
 	}
 
-	// 2. Single-NAL SEI: forwarded + decoded.
+	// 2. Single-NAL SEI: stream SEI on meta + AI decode still works.
 	if !s.handlePacket(append(rtpHead(96, 101), seiSingleNAL(chainJS(1001))...), &fu) {
 		t.Fatal("sei must forward")
+	}
+	waitAIBuf(t, s, 1)
+	if m := s.metaLag(0); len(m.SEI) == 0 || m.SEI[0].Type != 5 || m.SEI[0].Data == nil {
+		t.Fatalf("meta sei: %+v", m.SEI)
 	}
 
 	// 3. FU-A fragmented SEI across two packets.
@@ -80,6 +91,7 @@ func TestHandlePacketChain(t *testing.T) {
 		t.Fatal("non-video must not forward")
 	}
 
+	waitAIBuf(t, s, 5)
 	if len(s.buf) != 5 {
 		t.Fatalf("want 5 AI frames, got %d", len(s.buf))
 	}
@@ -95,4 +107,22 @@ func TestHandlePacketChain(t *testing.T) {
 	if len(o.Boxes) != 1 || o.Boxes[0].Label != "person" {
 		t.Fatalf("overlay broken: %+v", o)
 	}
+}
+
+func waitAIBuf(t *testing.T, s *session, n int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		got := len(s.buf)
+		mu.Unlock()
+		if got >= n {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	mu.Lock()
+	got := len(s.buf)
+	mu.Unlock()
+	t.Fatalf("ai buf want >= %d, got %d", n, got)
 }

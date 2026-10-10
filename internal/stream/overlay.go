@@ -1,5 +1,7 @@
 package stream
 
+import "github.com/abnos5525/go-streaming/internal/stream/ai"
+
 // OverlayBox is a single AI detection flattened for drawing on top of video.
 // X/Y/W/H are in source-frame pixels (same as AIFrame bbox).
 type OverlayBox struct {
@@ -13,12 +15,22 @@ type OverlayBox struct {
 }
 
 // Overlay is the dynamic, frontend-ready view of Meta.AI.
-// Width/Height come from probed video track so the player can scale boxes.
+// Width/Height come from gst-discoverer (HLS) or SPS (WebRTC).
+// Frames is a short raw window so the player can Hold on each painted
+// video frame with a live lag, not a poll-stale pick.
 type Overlay struct {
-	ID        string       `json:"id"`
+	ID        string         `json:"id"`
+	Timestamp int64          `json:"timestamp"`
+	Width     int            `json:"width,omitempty"`
+	Height    int            `json:"height,omitempty"`
+	Boxes     []OverlayBox   `json:"boxes"`
+	Frames    []OverlayFrame `json:"frames,omitempty"`
+	OffsetMS  int64          `json:"offset_ms,omitempty"`
+}
+
+// OverlayFrame is one AI sample for client-side Hold.
+type OverlayFrame struct {
 	Timestamp int64        `json:"timestamp"`
-	Width     int          `json:"width,omitempty"`
-	Height    int          `json:"height,omitempty"`
 	Boxes     []OverlayBox `json:"boxes"`
 }
 
@@ -31,11 +43,49 @@ func OverlayByID(id string) (Overlay, bool) { return OverlayByIDLag(id, -1) }
 func OverlayByIDLag(id string, lagMS int64) (Overlay, bool) {
 	mu.Lock()
 	s := sessByID(id)
-	mu.Unlock()
 	if s == nil {
+		mu.Unlock()
 		return Overlay{}, false
 	}
-	return overlayFromMeta(id, s.metaLag(lagMS)), true
+	if lagMS < 0 {
+		lagMS = s.laneLag()
+	}
+	o := overlayFromMeta(s.id, Meta{Tracks: s.tracks, AI: s.delayedAI(lagMS)})
+	// 4s still covers the LL-HLS hold. 80 samples keeps a frame near the
+	// picture; 32 spread across 4s made Hold land on an older box.
+	o.Frames = overlayFrames(s.buf, 4000, 80)
+	o.OffsetMS = aiOffsetMS()
+	mu.Unlock()
+	return o, true
+}
+
+func overlayFrames(buf []*ai.AIFrame, spanMS int64, nMax int) []OverlayFrame {
+	n := len(buf)
+	if n == 0 {
+		return nil
+	}
+	start := 0
+	if latest := buf[n-1].Frame.Timestamp; latest > 0 && spanMS > 0 {
+		cut := latest - spanMS
+		for start < n && buf[start].Frame.Timestamp < cut {
+			start++
+		}
+	}
+	buf = buf[start:]
+	if nMax > 1 && len(buf) > nMax {
+		step := len(buf) - 1
+		picked := make([]*ai.AIFrame, nMax)
+		for i := 0; i < nMax; i++ {
+			picked[i] = buf[i*step/(nMax-1)]
+		}
+		buf = picked
+	}
+	out := make([]OverlayFrame, len(buf))
+	for i, f := range buf {
+		o := overlayFromMeta("", Meta{AI: f})
+		out[i] = OverlayFrame{Timestamp: o.Timestamp, Boxes: o.Boxes}
+	}
+	return out
 }
 
 func overlayFromMeta(id string, m Meta) Overlay {

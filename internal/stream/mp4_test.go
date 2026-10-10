@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"project1/internal/stream/ai"
+	"github.com/abnos5525/go-streaming/internal/stream/ai"
 )
 
 func box(typ string, payload []byte) []byte {
@@ -82,12 +82,9 @@ func TestSplitBoxEmsg(t *testing.T) {
 	}
 }
 
-func TestFFmpegMP4Cmd(t *testing.T) {
-	s := strings.Join(ffmpegMP4Cmd("in").Args, " ")
-	for _, want := range []string{
-		"pipe:1", "mp4", "empty_moov", "omit_tfhd_offset", "frag_keyframe",
-		"default_base_moof", "frag_duration", "copy", "nobuffer",
-	} {
+func TestGSTMP4Cmd(t *testing.T) {
+	s := strings.Join(gstMP4Cmd("in").Args, " ")
+	for _, want := range []string{"gst-launch-1.0", "mp4mux", "streamable=true", "fdsink", "fd=1"} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("mp4 cmd missing %q: %s", want, s)
 		}

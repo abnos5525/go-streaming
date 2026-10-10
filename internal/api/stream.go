@@ -1,15 +1,14 @@
-package controllers
+package api
 
 import (
 	"fmt"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/pion/webrtc/v4"
-	"project1/internal/stream"
+	"github.com/abnos5525/go-streaming/internal/stream"
 )
 
 // rtcOffer is a browser SDP offer; only type "offer" is accepted.
@@ -30,66 +29,81 @@ func (o rtcOffer) SessionDescription() (webrtc.SessionDescription, error) {
 // lagFn, if set, returns how far the video element is behind live (ms).
 // That value is the overlay hold, so boxes share the picture's timestamp.
 const trackerJS = `
-function playerLagMS(el, hls) {
-  if (hls && typeof hls.latency === 'number' && isFinite(hls.latency) && hls.latency > 0)
-    return Math.round(hls.latency * 1000);
+function playerLagMS(el, hls, mediaTime) {
   try {
     if (el.seekable && el.seekable.length) {
       const live = el.seekable.end(el.seekable.length - 1);
-      const lag = live - el.currentTime;
-      if (lag > 0.05 && lag < 60) return Math.round(lag * 1000);
+      const t = (typeof mediaTime === 'number' && isFinite(mediaTime)) ? mediaTime : el.currentTime;
+      const lag = live - t;
+      if (lag > 0 && lag < 60) return Math.round(lag * 1000);
     }
   } catch (e) {}
+  if (hls && typeof hls.latency === 'number' && isFinite(hls.latency) && hls.latency > 0)
+    return Math.round(hls.latency * 1000);
   return null;
 }
-function videoReady(el) {
-  if (!el || el.readyState < 2 || el.videoWidth < 2 || el.videoHeight < 2) return false;
-  if (el._gotFrame) return true;
-  try {
-    if (el.getVideoPlaybackQuality && el.getVideoPlaybackQuality().totalVideoFrames > 0) {
-      el._gotFrame = true; return true;
-    }
-  } catch (e) {}
-  if (el.webkitDecodedFrameCount > 0) { el._gotFrame = true; return true; }
-  return false;
+function holdFrames(frames, lag, offset) {
+  if (!frames || !frames.length) return null;
+  if (!lag && !offset) return frames[frames.length - 1];
+  const latest = frames[frames.length - 1].timestamp || 0;
+  if (!latest) return frames[frames.length - 1];
+  const target = latest - lag - (offset || 0);
+  let best = null;
+  for (let i = 0; i < frames.length; i++) {
+    if ((frames[i].timestamp || 0) <= target) best = frames[i];
+  }
+  if (best) return best;
+  for (let i = frames.length - 1; i >= 0; i--) {
+    if (frames[i].boxes && frames[i].boxes.length) return frames[i];
+  }
+  return null;
 }
-function startTracker(vId, cId, ovURL, lagFn) {
+function startTracker(vId, cId, ovID, lagFn) {
 const v = document.getElementById(vId), c = document.getElementById(cId), x = c.getContext('2d');
-let ovCur = null;
-function fit() { c.width = v.clientWidth; c.height = v.clientHeight; }
+let ovCur = null, busy = false;
+function fit() {
+  const w = v.clientWidth, h = v.clientHeight;
+  if (c.width !== w) c.width = w;
+  if (c.height !== h) c.height = h;
+}
 addEventListener('resize', fit); v.addEventListener('loadedmetadata', fit); v.addEventListener('play', fit);
-function waitPaint() {
-  const mark = () => { v._gotFrame = true; };
-  v._gotFrame = false;
-  if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(mark);
-  v.addEventListener('playing', () => {
-    if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(mark);
-  });
-  v.addEventListener('emptied', () => {
-    v._gotFrame = false; ovCur = null;
-    if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(mark);
-  });
+function feed(o) { if (o && (Array.isArray(o.boxes) || Array.isArray(o.frames))) ovCur = o; }
+if (typeof lagFn === 'function') {
+  function pull() {
+    if (busy) return;
+    busy = true;
+    const n = lagFn();
+    const q = (n != null && n >= 0) ? ('?lag_ms=' + n) : '';
+    const ac = new AbortController();
+    const t = setTimeout(function() { ac.abort(); }, 2000);
+    fetch('/stream/overlay/' + ovID + q, {signal: ac.signal}).then(r => r.ok ? r.json() : null).then(feed).catch(function(){}).finally(function() { clearTimeout(t); busy = false; });
+  }
+  pull();
+  setInterval(pull, 100);
 }
-waitPaint();
-async function fetchOv() {
-  if (c.style.display === 'none' || !videoReady(v)) return;
-  try {
-    let url = ovURL;
-    const lag = typeof lagFn === 'function' ? lagFn() : null;
-    if (lag != null && lag >= 0) url += (ovURL.indexOf('?') >= 0 ? '&' : '?') + 'lag_ms=' + lag;
-    ovCur = await (await fetch(url)).json();
-  } catch (e) {}
-}
-function drawBoxes() {
-  requestAnimationFrame(drawBoxes);
+function paint(_now, meta) {
+  if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(paint);
+  else requestAnimationFrame(paint);
   if (c.style.display === 'none') return;
   fit();
   x.clearRect(0, 0, c.width, c.height);
-  if (!videoReady(v) || !ovCur || !ovCur.boxes || !ovCur.boxes.length) return;
+  if (!ovCur) return;
+  let lag;
+  if (typeof lagFn === 'function') {
+    const n = lagFn(meta && meta.mediaTime);
+    lag = (n != null && n >= 0) ? n : 600;
+  } else lag = 200; // WebRTC playout delay; 50 paints boxes ahead of the frame
+  let boxes = ovCur.boxes;
+  if (ovCur.frames && ovCur.frames.length) {
+    const p = holdFrames(ovCur.frames, lag, ovCur.offset_ms);
+    boxes = p && p.boxes ? p.boxes : [];
+  }
+  if (!boxes || !boxes.length) return;
   const rw = ovCur.width || v.videoWidth || c.width, rh = ovCur.height || v.videoHeight || c.height;
+  if (rw < 2 || rh < 2 || c.width < 2) return;
   const sx = c.width / rw, sy = c.height / rh;
   x.lineWidth = 2; x.font = '14px sans-serif';
-  for (const b of ovCur.boxes) {
+  for (const b of boxes) {
     x.strokeStyle = '#0f0'; x.strokeRect(b.x * sx, b.y * sy, b.w * sx, b.h * sy);
     const t = b.confidence ? b.label + ' ' + b.confidence.toFixed(2) : b.label;
     const w = x.measureText(t).width + 8;
@@ -97,7 +111,9 @@ function drawBoxes() {
     x.fillStyle = '#000'; x.fillText(t, b.x * sx + 4, b.y * sy - 5);
   }
 }
-setInterval(fetchOv, 100); fetchOv(); requestAnimationFrame(drawBoxes);
+if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(paint);
+else requestAnimationFrame(paint);
+return feed;
 }
 `
 
@@ -112,84 +128,146 @@ func watchPage(id string, outputType int) string {
 
 func playPage(id string) string {
 	src := "/hls/" + id + "/index.m3u8"
-	overlay := "/stream/overlay/" + id
 	return `<!doctype html>
 <meta charset="utf-8">
 <style>` + playerCSS + `</style>
-<div class="wrap"><video id="v" autoplay playsinline muted controls></video><canvas id="o"></canvas><div class="tag">HLS</div></div>
+<div class="wrap"><video id="v" autoplay playsinline muted controls></video><canvas id="o"></canvas><div class="tag">LL-HLS</div></div>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
 <script>
 const src = '` + src + `';
 const v = document.getElementById('v');
 let hlsPlayer = null;
-if (window.Hls && Hls.isSupported()) { hlsPlayer = new Hls({lowLatencyMode: true, liveSyncDurationCount: 2, liveMaxLatencyDurationCount: 4, maxBufferLength: 2, maxLiveSyncPlaybackRate: 1.5}); hlsPlayer.loadSource(src); hlsPlayer.attachMedia(v); }
+if (window.Hls && Hls.isSupported()) {
+  hlsPlayer = new Hls({lowLatencyMode: true, enableWorker: false});
+  hlsPlayer.loadSource(src);
+  hlsPlayer.attachMedia(v);
+  // Chrome MSE can stick on a part/playlist gap; recover without a full refresh.
+  hlsPlayer.on(Hls.Events.ERROR, (_, data) => {
+    if (!data || !data.fatal) return;
+    if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hlsPlayer.recoverMediaError();
+    else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hlsPlayer.startLoad();
+    else { try { hlsPlayer.destroy(); } catch (x) {} location.reload(); }
+  });
+  let lastT = -1, stuck = 0;
+  setInterval(() => {
+    if (!v || v.paused || v.readyState < 2) { stuck = 0; lastT = v ? v.currentTime : -1; return; }
+    if (v.currentTime === lastT) {
+      if (++stuck >= 6) { stuck = 0; try { hlsPlayer.startLoad(); } catch (x) {} }
+    } else { stuck = 0; }
+    lastT = v.currentTime;
+  }, 500);
+}
 else if (v.canPlayType('application/vnd.apple.mpegurl')) { v.src = src; }
 </script>
 <script>
 ` + trackerJS + `
-startTracker('v', 'o', '` + overlay + `', () => playerLagMS(v, hlsPlayer));
+startTracker('v', 'o', '` + id + `', (mt) => playerLagMS(v, hlsPlayer, mt));
 </script>`
 }
 
 func rtcPage(id string) string {
-	overlay := "/stream/overlay/" + id
-	rtcOffer := "/webrtc/" + id + "/offer"
 	return `<!doctype html>
 <meta charset="utf-8">
 <style>` + playerCSS + `</style>
 <div class="wrap"><video id="v" autoplay playsinline muted></video><canvas id="o"></canvas><div class="tag" id="s">WEBRTC</div></div>
 <script>
+` + trackerJS + `
+const feedOv = startTracker('v', 'o', '` + id + `');
 const s = document.getElementById('s');
-const rtcURL = '` + rtcOffer + `';
 const v = document.getElementById('v');
 async function startRTC() {
   let pc = null;
   for (;;) {
     try {
       s.textContent = 'WEBRTC';
-      pc = new RTCPeerConnection();
-      pc.ontrack = e => { v.srcObject = e.streams[0]; };
+      // Host candidates only: Google STUN is often blocked here and can stall gathering forever
+      // so POST /webrtc/.../offer never runs (Network shows only /play + overlay WS).
+      const vr = await fetch('/webrtc/` + id + `/viewers', {method:'POST'});
+      if (!vr.ok) throw new Error('viewer ' + vr.status);
+      const slot = await vr.json();
+      pc = new RTCPeerConnection({iceServers:[]});
+      const ovdc = pc.createDataChannel(slot.channel, {negotiated:true, id: slot.dc_id});
+      ovdc.onmessage = e => { try { feedOv(JSON.parse(e.data)); } catch (x) {} };
+      pc.ontrack = e => { try { e.receiver.jitterBufferTarget = 200; e.receiver.playoutDelayHint = 0.2; } catch (x) {} v.srcObject = (e.streams && e.streams[0]) ? e.streams[0] : new MediaStream([e.track]); v.play().catch(()=>{}); };
       pc.addTransceiver('video', {direction: 'recvonly'});
+      try {
+        const tr = pc.getTransceivers()[0];
+        const cs = RTCRtpReceiver.getCapabilities('video');
+        if (tr && tr.setCodecPreferences && cs) {
+          const pref = [];
+          const add = xs => { for (const c of xs) if (!pref.includes(c)) pref.push(c); };
+          const h = cs.codecs.filter(c => /H264/i.test(c.mimeType) && /packetization-mode=1/.test(c.sdpFmtpLine||''));
+          // Prefer Main/High HW paths first (cameras are avc1.4d0029). Baseline
+          // 42e01f first makes Chrome ICE-connect then stay black on Main.
+          add(h.filter(c => /profile-level-id=(4d|64)/i.test(c.sdpFmtpLine||'')));
+          add(h.filter(c => !/42e01f/.test(c.sdpFmtpLine||'')));
+          add(h);
+          add(cs.codecs);
+          tr.setCodecPreferences(pref);
+        }
+      } catch (x) {}
       await pc.setLocalDescription(await pc.createOffer());
-      await new Promise(res => {
-        if (pc.iceGatheringState === 'complete') return res();
-        pc.addEventListener('icegatheringstatechange', function h() {
-          if (pc.iceGatheringState === 'complete') { pc.removeEventListener('icegatheringstatechange', h); res(); }
-        });
-      });
-      const r = await fetch(rtcURL, {method: 'POST', headers: {'Content-Type': 'application/json'},
+      await Promise.race([
+        new Promise(res => {
+          if (pc.iceGatheringState === 'complete') return res();
+          pc.addEventListener('icegatheringstatechange', function h() {
+            if (pc.iceGatheringState === 'complete') { pc.removeEventListener('icegatheringstatechange', h); res(); }
+          });
+        }),
+        new Promise(res => {
+          pc.addEventListener('icecandidate', function h(ev) {
+            const c = ev.candidate && ev.candidate.candidate;
+            if (c && c.indexOf('typ host') >= 0 && c.indexOf('.local') < 0) { pc.removeEventListener('icecandidate', h); res(); }
+          });
+        }),
+        new Promise(r => setTimeout(r, 800))
+      ]);
+      const r = await fetch(slot.offer, {method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({sdp: pc.localDescription.sdp, type: pc.localDescription.type})});
       if (!r.ok) throw new Error('offer ' + r.status);
       await pc.setRemoteDescription(await r.json());
       await new Promise((res, rej) => {
         const t = setTimeout(() => rej(new Error('connect timeout')), 15000);
         const h = () => {
-          if (pc.connectionState === 'connected' || pc.connectionState === 'completed') { clearTimeout(t); pc.removeEventListener('connectionstatechange', h); res(); }
-          else if (pc.connectionState === 'failed') { clearTimeout(t); rej(new Error('failed')); }
+          if (pc.connectionState === 'connected' || pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') { clearTimeout(t); pc.removeEventListener('connectionstatechange', h); res(); }
+          else if (pc.connectionState === 'failed' || pc.iceConnectionState === 'failed') { clearTimeout(t); rej(new Error('failed')); }
         };
-        pc.addEventListener('connectionstatechange', h); h();
+        pc.addEventListener('connectionstatechange', h);
+        pc.addEventListener('iceconnectionstatechange', h);
+        h();
       });
       s.textContent = 'WEBRTC LIVE';
+      // Stay until ICE dies, or force re-offer if still black / picture frozen.
       await new Promise((res, rej) => {
+        // 1440p IDR arm under multi-cam load can exceed 8s after ICE connect.
+        const black = setTimeout(() => {
+          if (v.videoWidth === 0) rej(new Error('no video'));
+        }, 15000);
+        let lastT = v.currentTime, stuck = 0;
+        const freeze = setInterval(() => {
+          if (v.videoWidth === 0) return;
+          if (v.currentTime === lastT) {
+            if (++stuck >= 6) { clearInterval(freeze); clearTimeout(black); rej(new Error('frozen')); }
+          } else { stuck = 0; lastT = v.currentTime; }
+        }, 500);
         pc.addEventListener('connectionstatechange', function f() {
-          if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected' || pc.connectionState === 'closed') {
-            pc.removeEventListener('connectionstatechange', f); rej(new Error('lost'));
+          if (pc.connectionState === 'failed' || pc.connectionState === 'closed' || pc.iceConnectionState === 'failed') {
+            clearInterval(freeze);
+            clearTimeout(black);
+            pc.removeEventListener('connectionstatechange', f);
+            rej(new Error('lost'));
           }
         });
       });
     } catch (e) {
       try { if (pc) pc.close(); } catch (_) {}
       pc = null;
-      s.textContent = 'WEBRTC RECONNECTING';
-      await new Promise(r => setTimeout(r, 2000));
+      s.textContent = 'WEBRTC ' + (e && e.message ? e.message : 'RECONNECTING');
+      await new Promise(r => setTimeout(r, 400));
     }
   }
 }
 startRTC();
-</script>
-<script>
-` + trackerJS + `
-startTracker('v', 'o', '` + overlay + `', () => playerLagMS(v) ?? 100);
 </script>`
 }
 
@@ -216,20 +294,7 @@ func registerStream(r *gin.Engine) {
 		}
 		c.JSON(http.StatusOK, m)
 	})
-	r.GET("/stream/overlay/:id", func(c *gin.Context) {
-		lag := int64(-1)
-		if q := c.Query("lag_ms"); q != "" {
-			if v, err := strconv.ParseInt(q, 10, 64); err == nil && v >= 0 {
-				lag = v
-			}
-		}
-		o, ok := stream.OverlayByIDLag(c.Param("id"), lag)
-		if !ok {
-			c.JSON(http.StatusNotFound, gin.H{"message": "unknown stream"})
-			return
-		}
-		c.JSON(http.StatusOK, o)
-	})
+	r.GET("/stream/overlay/:id", serveOverlay)
 	r.GET("/mp4/:id", serveMP4)
 	r.GET("/live/:id", func(c *gin.Context) {
 		id := c.Param("id")
@@ -247,24 +312,34 @@ func registerStream(r *gin.Engine) {
 		}
 		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(rtcPage(id)))
 	})
-	r.POST("/webrtc/:id/offer", func(c *gin.Context) {
-		var offer rtcOffer
-		if err := c.ShouldBindJSON(&offer); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"message": "invalid offer"})
+	r.POST("/webrtc/:id/viewers", func(c *gin.Context) {
+		v, err := stream.OpenViewer(c.Param("id"))
+		if err != nil {
+			writeRTCErr(c, err)
 			return
 		}
-		desc, err := offer.SessionDescription()
+		c.JSON(http.StatusOK, v)
+	})
+	r.POST("/webrtc/:id/v/:viewer/offer", func(c *gin.Context) {
+		desc, ok := readRTCOffer(c)
+		if !ok {
+			return
+		}
+		answer, err := stream.RTCAnswerViewer(c.Param("id"), c.Param("viewer"), desc)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"message": err.Error()})
+			writeRTCErr(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"sdp": answer.SDP, "type": answer.Type.String()})
+	})
+	r.POST("/webrtc/:id/offer", func(c *gin.Context) {
+		desc, ok := readRTCOffer(c)
+		if !ok {
 			return
 		}
 		answer, err := stream.RTCAnswer(c.Param("id"), desc)
 		if err != nil {
-			code := http.StatusBadRequest
-			if err.Error() == "unknown stream" {
-				code = http.StatusNotFound
-			}
-			c.JSON(code, gin.H{"message": err.Error()})
+			writeRTCErr(c, err)
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"sdp": answer.SDP, "type": answer.Type.String()})
@@ -303,6 +378,28 @@ func registerStream(r *gin.Engine) {
 	})
 }
 
+func readRTCOffer(c *gin.Context) (webrtc.SessionDescription, bool) {
+	var offer rtcOffer
+	if err := c.ShouldBindJSON(&offer); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"message": "invalid offer"})
+		return webrtc.SessionDescription{}, false
+	}
+	desc, err := offer.SessionDescription()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"message": err.Error()})
+		return webrtc.SessionDescription{}, false
+	}
+	return desc, true
+}
+
+func writeRTCErr(c *gin.Context, err error) {
+	code := http.StatusBadRequest
+	if err.Error() == "unknown stream" || err.Error() == "unknown viewer" {
+		code = http.StatusNotFound
+	}
+	c.JSON(code, gin.H{"message": err.Error()})
+}
+
 // outPath is the single output the client asked for: 6 = HLS playlist, 7 = WebRTC offer.
 func outPath(id string, outputType int) (string, error) {
 	switch outputType {
@@ -316,11 +413,45 @@ func outPath(id string, outputType int) (string, error) {
 }
 
 func absURL(c *gin.Context, path string) string {
-	scheme := "http"
-	if c.Request.TLS != nil {
-		scheme = "https"
+	r := c.Request
+	proto := forwardedFirst(r.Header.Get("X-Forwarded-Proto"))
+	if proto == "" {
+		proto = "http"
+		if r.TLS != nil {
+			proto = "https"
+		}
 	}
-	return scheme + "://" + c.Request.Host + path
+	host := forwardedFirst(r.Header.Get("X-Forwarded-Host"))
+	if host == "" {
+		host = r.Host
+	}
+	return proto + "://" + host + path
+}
+
+func forwardedFirst(v string) string {
+	if i := strings.IndexByte(v, ','); i >= 0 {
+		v = v[:i]
+	}
+	return strings.TrimSpace(v)
+}
+
+func overlayLagQuery(c *gin.Context) int64 {
+	if q := c.Query("lag_ms"); q != "" {
+		if v, err := strconv.ParseInt(q, 10, 64); err == nil && v >= 0 {
+			return v
+		}
+	}
+	return -1
+}
+
+func serveOverlay(c *gin.Context) {
+	id := c.Param("id")
+	o, ok := stream.OverlayByIDLag(id, overlayLagQuery(c))
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"message": "unknown stream"})
+		return
+	}
+	c.JSON(http.StatusOK, o)
 }
 
 func serveHLS(c *gin.Context) {
@@ -329,19 +460,9 @@ func serveHLS(c *gin.Context) {
 		c.Status(http.StatusNotFound)
 		return
 	}
-	name := filepath.Base(c.Param("file"))
-	switch strings.ToLower(filepath.Ext(name)) {
-	case ".m3u8":
-		c.Header("Content-Type", "application/vnd.apple.mpegurl")
-		c.Header("Cache-Control", "no-cache, no-store")
-	case ".ts":
-		c.Header("Content-Type", "video/mp2t")
-		c.Header("Cache-Control", "max-age=1")
-	default:
+	if !stream.ServeHLS(c.Writer, c.Request, id) {
 		c.Status(http.StatusNotFound)
-		return
 	}
-	c.File(filepath.Join(stream.Dir(), id, name))
 }
 
 func serveMP4(c *gin.Context) {
@@ -606,7 +727,11 @@ function onAppend() {
   } catch (e) {}
 }
 run();
-function fit() { c.width = v.clientWidth; c.height = v.clientHeight; }
+function fit() {
+  const w = v.clientWidth, h = v.clientHeight;
+  if (c.width !== w) c.width = w;
+  if (c.height !== h) c.height = h;
+}
 addEventListener('resize', fit); v.addEventListener('loadedmetadata', fit); v.addEventListener('play', fit);
 requestAnimationFrame(drawCues);
 </script>`

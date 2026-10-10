@@ -1,5 +1,5 @@
 package main
 
-import "project1/internal/httpserver"
+import "github.com/abnos5525/go-streaming/internal/httpserver"
 
 func main() { httpserver.Run() }

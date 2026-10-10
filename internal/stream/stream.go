@@ -5,10 +5,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
@@ -19,9 +19,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"project1/internal/stream/ai"
-	"project1/internal/stream/algo"
-	"project1/internal/stream/rtp"
+	"github.com/abnos5525/go-streaming/internal/protocols/h264"
+	"github.com/abnos5525/go-streaming/internal/protocols/hls"
+	"github.com/abnos5525/go-streaming/internal/protocols/rtp"
+	rtc "github.com/abnos5525/go-streaming/internal/protocols/webrtc"
+	"github.com/abnos5525/go-streaming/internal/stream/ai"
+	"github.com/abnos5525/go-streaming/internal/stream/algo"
 )
 
 const (
@@ -29,12 +32,9 @@ const (
 	dir        = "hls"
 )
 
-// hlsSegTime/hlsSegList set HLS latency: the player trails ~2
-// segments, so latency ≈ segTime × 2. HLS is the stable fallback lane;
-// the minimum-delay lane is mp4/MSE (/live/:id, no segments on the wire).
-// 1s keeps copy-mode segments regular with typical camera GOPs
-// (sub-second targets cut only on keyframes and cause rebuffer ticks).
-// Override with HLS_TIME / HLS_LIST_SIZE; AI delay math follows automatically.
+// hlsSegTime is the LL-HLS parent-segment minimum (must include a keyframe).
+// Latency is PART-HOLD-BACK (3×200ms), not N×segment. HLS_LIST_SIZE is the
+// window of completed segments (Apple LL-HLS needs ≥7).
 func hlsSegTime() float64 {
 	if v, err := strconv.ParseFloat(os.Getenv("HLS_TIME"), 64); err == nil && v >= 0.25 && v <= 6 {
 		return v
@@ -43,30 +43,44 @@ func hlsSegTime() float64 {
 }
 
 func hlsSegList() int {
-	if v, _ := strconv.Atoi(os.Getenv("HLS_LIST_SIZE")); v >= 2 && v <= 8 {
+	if v, _ := strconv.Atoi(os.Getenv("HLS_LIST_SIZE")); v >= 7 && v <= 15 {
 		return v
 	}
-	return 4
+	return 7
 }
 
-func aiDelayMS() int64 { return int64(hlsSegTime() * float64(hlsSegList()) * 1000) }
+func aiDelayMS() int64 { return 3 * hls.PartMin.Milliseconds() }
 
 type session struct {
-	url, id, last string
-	proc          *os.Process
-	gen           int
-	running       bool
-	spsB64        string
-	ppsB64        string
-	mp4Proc       *os.Process
-	mp4Hub        *mp4Hub
-	rtcHub        *rtcHub
-	tracks        []Track
-	rtpTS         atomic.Uint32
-	delayMS       atomic.Int64
-	buf           []*ai.AIFrame
-	arr           []int64 // server arrival ms per buf entry (same order)
-	out           int     // 6 = HLS, 7 = WebRTC; latest start wins
+	url, id, last  string
+	proc           *os.Process
+	gen            int
+	running        bool
+	spsB64         string
+	ppsB64         string
+	mp4Proc        *os.Process
+	mp4Hub         *mp4Hub
+	rtcHub         *rtc.Hub
+	tracks         []Track
+	rtpTS          atomic.Uint32
+	delayMS        atomic.Int64
+	buf            []*ai.AIFrame
+	arr            []int64 // server arrival ms per buf entry (same order)
+	out            int     // 6 = LL-HLS, 7 = WebRTC; latest start is /play only
+	wantRTC        bool
+	ll             *hls.Hub
+	llReady        atomic.Bool
+	llNeedIDR      atomic.Bool // set on llCh drop; skip WriteH264 until next IDR
+	spsNAL, ppsNAL []byte
+	llFU           []byte
+	llAU           hls.Acc
+	llCh           chan []byte
+	ovSig          chan struct{}
+	mc             *net.UDPConn
+	viewers        map[string]*rtcViewer // per-person signaling + data channel
+	aiViaLogged    bool
+	aiCh           chan *ai.AIFrame // off sniff: raw-json must not stall UDP Read
+	sei            []h264.SEI       // latest SEI messages from H264 NAL type 6
 }
 
 type Track struct {
@@ -88,6 +102,7 @@ type Meta struct {
 	Tracks     []Track     `json:"tracks,omitempty"`
 	RTP        uint32      `json:"rtp,omitempty"`
 	AI         *ai.AIFrame `json:"ai,omitempty"`
+	SEI        []h264.SEI  `json:"sei,omitempty"`
 	AIAgeMS    int64       `json:"ai_age_ms,omitempty"`
 	AIFPS      float64     `json:"ai_fps,omitempty"`
 	OutputType int         `json:"output_type,omitempty"`
@@ -124,6 +139,20 @@ func Status() []Meta {
 
 func (s *session) playlist() string { return "/hls/" + s.id + "/index.m3u8" }
 
+func (s *session) outURL() string {
+	if s.out == 7 {
+		return "/webrtc/" + s.id + "/offer"
+	}
+	return s.playlist()
+}
+
+func (s *session) laneReady() bool {
+	if s.out == 7 {
+		return s.running && s.rtcHub != nil
+	}
+	return s.llReady.Load()
+}
+
 func (s *session) meta() Meta { return s.metaLag(-1) }
 
 func (s *session) laneLag() int64 { return s.hlsLagMS() }
@@ -144,7 +173,6 @@ func (s *session) metaLag(want int64) Meta {
 	if lag < 0 {
 		lag = s.laneLag()
 	}
-	_, err := os.Stat(filepath.Join(dir, s.id, "index.m3u8"))
 	now := time.Now().UnixMilli()
 	mu.Lock()
 	defer mu.Unlock()
@@ -158,7 +186,7 @@ func (s *session) metaLag(want int64) Meta {
 			age = 0
 		}
 	}
-	return Meta{ID: s.id, URL: s.playlist(), RTSP: s.url, Started: s.running, Ready: err == nil, Error: s.last, Tracks: s.tracks, RTP: s.rtpTS.Load(), AI: s.delayedAI(lag), AIAgeMS: age, AIFPS: fpsOf(s.arr), OutputType: s.out}
+	return Meta{ID: s.id, URL: s.outURL(), RTSP: s.url, Started: s.running, Ready: s.laneReady(), Error: s.last, Tracks: s.tracks, RTP: s.rtpTS.Load(), AI: s.delayedAI(lag), SEI: s.sei, AIAgeMS: age, AIFPS: fpsOf(s.arr), OutputType: s.out}
 }
 
 func sessByID(id string) *session {
@@ -185,16 +213,20 @@ func idFor(url string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-func resolve(url string) (string, error) {
-	url = strings.TrimSpace(url)
-	if url == "" {
-		url = DefaultURL
+func resolve(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		raw = DefaultURL
 	}
-	low := strings.ToLower(url)
-	switch {
-	case strings.HasPrefix(low, "rtsp://"), strings.HasPrefix(low, "rtsps://"),
-		strings.HasPrefix(low, "udp://"), strings.HasPrefix(low, "rtp://"):
-		return url, nil
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("url must be rtsp://, udp:// or rtp://")
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "rtsp", "rtsps":
+		return raw, nil
+	case "udp", "rtp":
+		return strings.ToLower(u.Scheme) + "://" + u.Host, nil
 	default:
 		return "", fmt.Errorf("url must be rtsp://, udp:// or rtp://")
 	}
@@ -203,28 +235,42 @@ func resolve(url string) (string, error) {
 func Start(url string, outputType int) (Meta, error) {
 	url, err := resolve(url)
 	if err != nil {
+		logStream("FAIL", "-", url, "start rejected: %v", err)
 		return Meta{}, err
 	}
 	mu.Lock()
 	if s, ok := sessions[url]; ok && s.running {
+		hadRTC := s.wantRTC || s.rtcHub != nil
+		hadLL := s.ll != nil
 		if err := s.setLaneLocked(outputType); err != nil {
 			mu.Unlock()
+			logStream("FAIL", s.id, url, "lane %s: %v", laneLabel(outputType), err)
 			return Meta{}, err
 		}
+		id := s.id
+		newRTC := !hadRTC && (s.wantRTC || s.rtcHub != nil)
+		newLL := !hadLL && s.ll != nil
 		mu.Unlock()
+		// SPA re-POSTs /stream/start on every wall refresh — do not spam START.
+		if newRTC || newLL {
+			logStream("START", id, url, "lane=%s ingest=reuse play=%s", laneLabel(outputType), browserPlay(id))
+		}
 		return s.meta(), nil
 	}
 	s := &session{url: url, id: idFor(url), running: true, gen: 1, out: outputType}
 	s.delayMS.Store(aiDelayMS())
 	if err := s.setLaneLocked(outputType); err != nil {
 		mu.Unlock()
+		logStream("FAIL", s.id, url, "lane %s: %v", laneLabel(outputType), err)
 		return Meta{}, err
 	}
 	sessions[url] = s
 	my := s.gen
+	id := s.id
 	mu.Unlock()
 	if err := os.MkdirAll(filepath.Join(dir, s.id), 0o755); err != nil {
 		s.stopIf(my)
+		logStream("FAIL", id, url, "hls dir: %v", err)
 		return Meta{}, err
 	}
 	wipe(s.id)
@@ -235,63 +281,118 @@ func Start(url string, outputType int) (Meta, error) {
 func Stop(url string) error {
 	url, err := resolve(url)
 	if err != nil {
+		logStream("FAIL", "-", url, "stop rejected: %v", err)
 		return err
 	}
 	mu.Lock()
 	s, ok := sessions[url]
 	if !ok || !s.running {
 		mu.Unlock()
+		logStream("FAIL", "-", url, "stop: stream not running")
 		return fmt.Errorf("stream not running")
 	}
 	s.gen++
-	if s.proc != nil {
-		_ = s.proc.Kill()
-		s.proc = nil
-	}
+	proc := s.proc
+	s.proc = nil
+	mc := s.mc
+	s.mc = nil
+	ip := mcastIP(s.url)
+	keep := siblingSockets(ip, mc)
+	rtc := s.detachRTCLocked()
+	ll := s.detachLLLocked()
 	s.stopMP4Locked()
-	s.stopRTCLocked()
 	s.running = false
+	s.stopAILocked()
 	s.last = ""
 	delete(sessions, url)
 	id := s.id
 	mu.Unlock()
+	if proc != nil {
+		_ = proc.Kill()
+	}
+	if mc != nil {
+		_ = mc.Close()
+	}
+	for _, c := range keep {
+		rtp.Rejoin(c, ip)
+	}
+	closeLL(ll)
+	closeRTC(rtc)
 	wipe(id)
+	logStream("STOP", id, url, "ok")
 	return nil
 }
 
-// setLaneLocked applies output_type. WebRTC gets a pion hub; HLS drops it
-// so unused peer connections do not sit around. Caller holds mu.
+func mcastIP(raw string) net.IP {
+	u := rtp.MulticastURL(raw)
+	if u == nil {
+		return nil
+	}
+	return net.ParseIP(u.Hostname())
+}
+
+func siblingSockets(ip net.IP, except *net.UDPConn) []*net.UDPConn {
+	if ip == nil {
+		return nil
+	}
+	var out []*net.UDPConn
+	for _, o := range sessions {
+		if o.mc == nil || o.mc == except {
+			continue
+		}
+		if got := mcastIP(o.url); got != nil && got.Equal(ip) {
+			out = append(out, o.mc)
+		}
+	}
+	return out
+}
+
+// setLaneLocked starts the requested lane. The other lane stays up so a
+// videowall can play HLS and WebRTC from the same ingest URL. /play still
+// follows s.out (latest start). Caller holds mu.
 func (s *session) setLaneLocked(outputType int) error {
 	s.out = outputType
 	if outputType == 7 {
-		if s.rtcHub != nil {
-			return nil
-		}
-		hub, err := newRTCHub()
-		if err != nil {
-			return err
-		}
-		s.rtcHub = hub
+		s.wantRTC = true
+		return s.ensureRTCLocked()
+	}
+	return s.startLLLocked()
+}
+
+func (s *session) ensureRTCLocked() error {
+	if s.rtcHub != nil {
+		s.rtcHub.SetParams(s.spsNAL, s.ppsNAL)
 		return nil
 	}
-	s.stopRTCLocked()
+	hub, err := rtc.NewHub(s.h264Cap())
+	if err != nil {
+		return err
+	}
+	hub.SetParams(s.spsNAL, s.ppsNAL)
+	s.rtcHub = hub
 	return nil
 }
 
 func (s *session) want(my, typ int) bool {
 	mu.Lock()
 	defer mu.Unlock()
-	return s.gen == my && s.out == typ
+	if s.gen != my {
+		return false
+	}
+	if typ == 6 {
+		return s.ll != nil || s.out == 6
+	}
+	return s.wantRTC || s.rtcHub != nil || s.out == 7
 }
 
 func (s *session) loop(my int) {
-	in := ffmpegInput(s.url)
+	in := muxInput(s.url)
 	sniffed := false
 	if u := rtp.MulticastURL(s.url); u != nil {
 		p := filepath.Join(dir, s.id, "in.sdp")
 		if mc, err := rtp.JoinMulticast(u); err != nil {
-			s.set(err.Error())
-			log.Printf("ingest %s multicast listen: %v", s.id, err)
+			s.set("multicast join: " + err.Error())
+			logStream("WARN", s.id, s.url, "multicast join failed — falling back to remux: %v", err)
 			_ = os.WriteFile(p, []byte(rtp.SDP(u, "", "")), 0o644)
 			in = p
 		} else {
@@ -299,7 +400,7 @@ func (s *session) loop(my int) {
 			ru, _ := url.Parse(fmt.Sprintf("rtp://127.0.0.1:%d", rp))
 			if err := os.WriteFile(p, []byte(rtp.SDP(ru, "", "")), 0o644); err != nil {
 				mc.Close()
-				s.set(err.Error())
+				s.set("relay sdp: " + err.Error())
 			} else {
 				in = p
 				sniffed = true
@@ -307,32 +408,65 @@ func (s *session) loop(my int) {
 			}
 		}
 	}
-	log.Printf("ingest %s input %s sniffed=%v", s.id, in, sniffed)
-	go s.hlsLoop(my, in)
-	if !sniffed {
+	mu.Lock()
+	lane := s.out
+	id, u := s.id, s.url
+	mu.Unlock()
+	ingest := "remux"
+	if sniffed {
+		ingest = "sniff"
+	} else {
+		go s.hlsRemux(my, in)
 		go s.rtcRemux(my, in)
 	}
+	logStream("START", id, u, "lane=%s ingest=%s play=%s", laneLabel(lane), ingest, browserPlay(id))
 }
 
-func (s *session) hlsLoop(my int, in string) {
-	playlist := filepath.Join(dir, s.id, "index.m3u8")
-	probed := false
+// hlsRemux is RTSP / failed-join only. The multicast path writes AUs
+// from sniff into gohlslib (no remuxer).
+func (s *session) hlsRemux(my int, in string) {
 	for s.alive(my) {
 		if !s.want(my, 6) {
 			time.Sleep(200 * time.Millisecond)
 			continue
 		}
-		if _, err := exec.LookPath("ffmpeg"); err != nil {
-			s.set("ffmpeg not in PATH")
+		if _, err := exec.LookPath("gst-launch-1.0"); err != nil {
+			s.set("gst-launch-1.0 not in PATH")
 			time.Sleep(2 * time.Second)
 			continue
 		}
-		if !probed {
-			go s.probeWhenReady(my, playlist)
-			probed = true
+		rconn, port, err := bindRTCPort(s.id)
+		if err != nil {
+			s.set(err.Error())
+			time.Sleep(2 * time.Second)
+			continue
 		}
-		_ = os.Remove(playlist)
-		s.runFF(my, 6, ffmpegHLSCmd(in, playlist))
+		go s.pumpLL(my, rconn)
+		s.runFF(my, 6, gstRTPCmd(in, port))
+		_ = rconn.Close()
+	}
+}
+
+func (s *session) pumpLL(my int, conn net.PacketConn) {
+	buf := make([]byte, 8192)
+	var fu []byte
+	var acc hls.Acc
+	for {
+		if !s.alive(my) {
+			return
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, _, err := conn.ReadFrom(buf)
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				if !s.want(my, 6) {
+					return
+				}
+				continue
+			}
+			return
+		}
+		s.ingestRTP(buf[:n], &fu, &acc)
 	}
 }
 
@@ -344,8 +478,8 @@ func (s *session) rtcRemux(my int, in string) {
 			time.Sleep(200 * time.Millisecond)
 			continue
 		}
-		if _, err := exec.LookPath("ffmpeg"); err != nil {
-			s.set("ffmpeg not in PATH")
+		if _, err := exec.LookPath("gst-launch-1.0"); err != nil {
+			s.set("gst-launch-1.0 not in PATH")
 			time.Sleep(2 * time.Second)
 			continue
 		}
@@ -363,8 +497,8 @@ func (s *session) rtcRemux(my int, in string) {
 			time.Sleep(200 * time.Millisecond)
 			continue
 		}
-		go s.pumpRTP(my, rconn, hub.track)
-		s.runFF(my, 7, ffmpegRTPCmd(in, port))
+		go s.pumpRTP(my, rconn, hub)
+		s.runFF(my, 7, gstRTPCmd(in, port))
 		_ = rconn.Close()
 	}
 }
@@ -372,9 +506,9 @@ func (s *session) rtcRemux(my int, in string) {
 func (s *session) runFF(my, typ int, cmd *exec.Cmd) {
 	var stderr bytes.Buffer
 	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
-	log.Printf("%s ffmpeg %s", s.id, strings.Join(cmd.Args, " "))
+	logStream("INFO", s.id, s.url, "gst %s port-cmd ready", laneLabel(typ))
 	if err := cmd.Start(); err != nil {
-		s.set(err.Error())
+		s.set("gst start: " + err.Error())
 		time.Sleep(2 * time.Second)
 		return
 	}
@@ -408,7 +542,7 @@ ended:
 		s.proc = nil
 	}
 	alive := s.gen == my
-	keep := s.out == typ
+	keep := (typ == 6 && (s.ll != nil || s.out == 6)) || (typ == 7 && (s.wantRTC || s.rtcHub != nil || s.out == 7))
 	mu.Unlock()
 	if !alive || !keep {
 		return
@@ -418,10 +552,9 @@ ended:
 		if msg == "" {
 			msg = err.Error()
 		}
-		s.set(msg)
-		log.Printf("%s: %v", s.id, err)
+		s.set("gst " + laneLabel(typ) + ": " + msg)
 	} else {
-		s.set("ffmpeg exited")
+		s.set("gst " + laneLabel(typ) + " exited")
 	}
 	time.Sleep(2 * time.Second)
 }
@@ -434,14 +567,32 @@ func (s *session) alive(my int) bool {
 
 func (s *session) stopIf(my int) {
 	mu.Lock()
-	if s.gen == my {
-		s.running = false
-		s.proc = nil
-		s.stopMP4Locked()
-		s.stopRTCLocked()
-		delete(sessions, s.url)
+	if s.gen != my {
+		mu.Unlock()
+		return
 	}
+	s.running = false
+	s.proc = nil
+	mc := s.mc
+	s.mc = nil
+	ip := mcastIP(s.url)
+	keep := siblingSockets(ip, mc)
+	rtc := s.detachRTCLocked()
+	ll := s.detachLLLocked()
+	s.stopMP4Locked()
+	s.stopAILocked()
+	id, u := s.id, s.url
+	delete(sessions, s.url)
 	mu.Unlock()
+	if mc != nil {
+		_ = mc.Close()
+	}
+	for _, c := range keep {
+		rtp.Rejoin(c, ip)
+	}
+	closeLL(ll)
+	closeRTC(rtc)
+	logStream("STOP", id, u, "aborted")
 }
 
 func wipe(id string) {
@@ -450,10 +601,17 @@ func wipe(id string) {
 }
 
 func (s *session) pushAI(f *ai.AIFrame, arrived int64) {
+	if s.dropBlank(f) {
+		return
+	}
 	ts := f.Frame.Timestamp
 	n := len(s.buf)
 	switch {
 	case n > 0 && s.buf[n-1].Frame.Timestamp == ts:
+		if !aiHits(f) && aiHits(s.buf[n-1]) {
+			s.arr[n-1] = arrived
+			break
+		}
 		s.buf[n-1] = f
 		s.arr[n-1] = arrived
 	case n == 0 || s.buf[n-1].Frame.Timestamp < ts:
@@ -465,8 +623,12 @@ func (s *session) pushAI(f *ai.AIFrame, arrived int64) {
 			i++
 		}
 		if i < n && s.buf[i].Frame.Timestamp == ts {
-			s.buf[i] = f
-			s.arr[i] = arrived
+			if !aiHits(f) && aiHits(s.buf[i]) {
+				s.arr[i] = arrived
+			} else {
+				s.buf[i] = f
+				s.arr[i] = arrived
+			}
 		} else {
 			s.buf = append(s.buf, nil)
 			copy(s.buf[i+1:], s.buf[i:])
@@ -478,8 +640,8 @@ func (s *session) pushAI(f *ai.AIFrame, arrived int64) {
 	}
 	latest := s.buf[len(s.buf)-1].Frame.Timestamp
 	keep := s.delayMS.Load()
-	if keep < aiDelayMS() {
-		keep = aiDelayMS()
+	if keep < 8000 {
+		keep = 8000
 	}
 	cut := latest - keep - 4000
 	i := 0
@@ -492,6 +654,40 @@ func (s *session) pushAI(f *ai.AIFrame, arrived int64) {
 		s.buf = s.buf[n-400:]
 		s.arr = s.arr[n-400:]
 	}
+}
+
+func aiHits(f *ai.AIFrame) bool {
+	if f == nil {
+		return false
+	}
+	for _, r := range f.Results {
+		if len(r.Objects) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// dropBlank ignores keepalives and the empty SEI that cameras put on each
+// IDR (a blink every GOP). A real "objects left" empty is kept once it is
+// older than one keyframe interval after the last hit.
+func (s *session) dropBlank(f *ai.AIFrame) bool {
+	n := len(s.buf)
+	if n == 0 || aiHits(f) {
+		return false
+	}
+	last := s.buf[n-1]
+	if !aiHits(last) {
+		return false
+	}
+	if len(f.Results) == 0 {
+		return true
+	}
+	dt := f.Frame.Timestamp - last.Frame.Timestamp
+	if dt < 0 {
+		dt = -dt
+	}
+	return dt < 2500
 }
 
 func (s *session) delayedAI(delayMS int64) *ai.AIFrame {
@@ -517,23 +713,8 @@ func (s *session) delayedAIAt(delayMS, nowMS int64) *ai.AIFrame {
 }
 
 func (s *session) hlsLagMS() int64 {
-	b, err := os.ReadFile(filepath.Join(dir, s.id, "index.m3u8"))
-	if err != nil {
-		if v := s.delayMS.Load(); v > 0 {
-			return v
-		}
-		return aiDelayMS()
-	}
-	durs, _ := algo.ParseEXTINF(b)
-	if ms := algo.PlaylistLagMS(durs); ms > 0 {
-		// GOP too long for the requested segment: copy can't cut
-		// without a keyframe, so the playlist holds many seconds.
-		// Warn once per session so operator can shorten camera GOP.
-		if ms > int64(hlsSegTime()*3000) && s.last != "long GOP" {
-			log.Printf("hls %s segment %.1fs > 3x target %.1fs: camera GOP too long, shorten GOP", s.id, float64(ms)/1000, hlsSegTime())
-			s.last = "long GOP"
-		}
-		return ms
+	if v := s.delayMS.Load(); v > 0 {
+		return v
 	}
 	return aiDelayMS()
 }
@@ -556,53 +737,85 @@ func (s *session) probeWhenReady(my int, playlist string) {
 }
 
 func probe(raw string) []Track {
-	in := ffmpegInput(raw)
-	args := append([]string{"-v", "error"}, ffmpegNet(in)...)
-	if !strings.HasPrefix(strings.ToLower(in), "rtsp") {
-		args = append(args, "-allowed_extensions", "ALL")
-	}
-	args = append(args, "-show_streams", "-of", "json", "-i", in)
+	in := muxInput(raw)
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "ffprobe", args...).Output()
+	out, err := exec.CommandContext(ctx, "gst-discoverer-1.0", "--timeout=10", in).Output()
 	if err != nil {
 		return nil
 	}
-	return tracksFromProbe(out)
+	return tracksFromDiscoverer(out)
 }
 
-func tracksFromProbe(b []byte) []Track {
-	var p struct {
-		Streams []struct {
-			CodecType  string            `json:"codec_type"`
-			CodecName  string            `json:"codec_name"`
-			Width      int               `json:"width"`
-			Height     int               `json:"height"`
-			RFrameRate string            `json:"r_frame_rate"`
-			Tags       map[string]string `json:"tags"`
-		} `json:"streams"`
-	}
-	if json.Unmarshal(b, &p) != nil {
-		return nil
-	}
-	out := make([]Track, 0, len(p.Streams))
-	for _, s := range p.Streams {
-		t := Track{Type: s.CodecType, Codec: s.CodecName, Width: s.Width, Height: s.Height, Handler: s.Tags["handler_name"]}
-		if s.RFrameRate != "" && s.RFrameRate != "0/0" {
-			t.FPS = s.RFrameRate
+func tracksFromDiscoverer(b []byte) []Track {
+	var out []Track
+	var cur *Track
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "video:"):
+			out = append(out, Track{Type: "video", Codec: strings.TrimSpace(strings.TrimPrefix(line, "video:"))})
+			cur = &out[len(out)-1]
+		case strings.HasPrefix(line, "audio:"):
+			out = append(out, Track{Type: "audio", Codec: strings.TrimSpace(strings.TrimPrefix(line, "audio:"))})
+			cur = &out[len(out)-1]
+		case cur != nil && strings.HasPrefix(line, "Width:"):
+			cur.Width, _ = strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "Width:")))
+		case cur != nil && strings.HasPrefix(line, "Height:"):
+			cur.Height, _ = strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "Height:")))
+		case cur != nil && strings.HasPrefix(line, "Frame rate:"):
+			cur.FPS = strings.TrimSpace(strings.TrimPrefix(line, "Frame rate:"))
 		}
-		out = append(out, t)
 	}
 	return out
 }
 
 func (s *session) set(msg string) {
 	mu.Lock()
+	if s.last == msg {
+		mu.Unlock()
+		return
+	}
 	s.last = msg
+	id, u := s.id, s.url
 	mu.Unlock()
+	if msg != "" {
+		logStream("ERROR", id, u, "%s", msg)
+	}
 }
 
-// tailErr keeps only the tail of ffmpeg stderr: repeats of the same decoder
+// logStream is the single console line shape for stream lifecycle.
+// Example: [stream] START │ e903… │ udp://… │ lane=WebRTC ingest=sniff play=http://127.0.0.1:8085/play/e903…
+func logStream(kind, id, url, format string, args ...any) {
+	detail := fmt.Sprintf(format, args...)
+	if id == "" {
+		id = "-"
+	}
+	if url == "" {
+		url = "-"
+	}
+	log.Printf("[stream] %-5s │ %-16s │ %s │ %s", kind, id, url, detail)
+}
+
+func publicBase() string {
+	if ip := strings.TrimSpace(os.Getenv("HOST_IP")); ip != "" {
+		return "http://" + ip + ":8085"
+	}
+	return "http://127.0.0.1:8085"
+}
+
+func browserPlay(id string) string {
+	return publicBase() + "/play/" + id
+}
+
+func laneLabel(t int) string {
+	if t == 7 {
+		return "WebRTC"
+	}
+	return "LL-HLS"
+}
+
+// tailErr keeps only the tail of muxer stderr: repeats of the same decoder
 // warning otherwise bury the actual failure in a megabyte of text.
 func tailErr(s string) string {
 	s = strings.TrimSpace(s)

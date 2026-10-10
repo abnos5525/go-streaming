@@ -6,7 +6,17 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"strconv"
+	"strings"
+
+	"golang.org/x/net/ipv4"
+)
+
+// Shared 90 kHz media clock (HLS PTS + WebRTC RTP ts).
+const (
+	Frame90k = 3600  // 40ms at 90 kHz (25 fps)
+	Jump90k  = 18000 // 200ms — a larger RTP gap makes Chrome hold currentTime
 )
 
 // SDP describes the local relay (or source) as an H264 RTP session.
@@ -87,17 +97,84 @@ func LanIPv4() string {
 	return fallback
 }
 
-// JoinMulticast opens the multicast group socket for sniff + relay.
+// mcastIface prefers HOST_IP when set so sniff joins the NIC that
+// actually carries camera multicast, not an arbitrary 192.168 address.
+func mcastIface() *net.Interface {
+	if ip := strings.TrimSpace(os.Getenv("HOST_IP")); ip != "" {
+		if ifi := ifaceByIP(ip); ifi != nil {
+			return ifi
+		}
+	}
+	if lan := LanIPv4(); lan != "" {
+		return ifaceByIP(lan)
+	}
+	return nil
+}
+
+func mcastIfaces() []*net.Interface {
+	var out []*net.Interface
+	seen := map[int]bool{}
+	add := func(ifi *net.Interface) {
+		if ifi == nil || seen[ifi.Index] {
+			return
+		}
+		if ifi.Flags&net.FlagUp == 0 || ifi.Flags&net.FlagMulticast == 0 || ifi.Flags&net.FlagLoopback != 0 {
+			return
+		}
+		seen[ifi.Index] = true
+		out = append(out, ifi)
+	}
+	add(mcastIface())
+	ifaces, _ := net.Interfaces()
+	for i := range ifaces {
+		add(&ifaces[i])
+	}
+	return out
+}
+
+// JoinMulticast opens the multicast group on every up NIC. A single
+// ListenMulticastUDP on an arbitrary 192.168/Docker iface gets zero RTP
+// (ready=false, WebRTC answers Baseline and stays black).
 func JoinMulticast(u *url.URL) (*net.UDPConn, error) {
 	addr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(u.Hostname(), u.Port()))
 	if err != nil {
 		return nil, err
 	}
-	var ifi *net.Interface
-	if lan := LanIPv4(); lan != "" {
-		ifi = ifaceByIP(lan)
+	c, err := net.ListenUDP("udp4", addr)
+	if err != nil {
+		return listenOne(addr)
 	}
-	c, err := net.ListenMulticastUDP("udp4", ifi, addr)
+	p := ipv4.NewPacketConn(c)
+	n := 0
+	for _, ifi := range mcastIfaces() {
+		if err := p.JoinGroup(ifi, &net.UDPAddr{IP: addr.IP}); err == nil {
+			n++
+		}
+	}
+	if n == 0 {
+		c.Close()
+		return listenOne(addr)
+	}
+	_ = c.SetReadBuffer(4 << 20)
+	return c, nil
+}
+
+// Rejoin restores IGMP membership on an already-open socket.
+// Windows drops the group for the whole NIC when any socket Leaves, so a
+// sibling on the same 224.x address (different UDP port) goes silent until
+// it Joins again.
+func Rejoin(c *net.UDPConn, ip net.IP) {
+	if c == nil || ip == nil {
+		return
+	}
+	p := ipv4.NewPacketConn(c)
+	for _, ifi := range mcastIfaces() {
+		_ = p.JoinGroup(ifi, &net.UDPAddr{IP: ip})
+	}
+}
+
+func listenOne(addr *net.UDPAddr) (*net.UDPConn, error) {
+	c, err := net.ListenMulticastUDP("udp4", mcastIface(), addr)
 	if err != nil {
 		return nil, err
 	}
@@ -196,6 +273,51 @@ func NALs(payload []byte, fu *[]byte) [][]byte {
 			n := *fu
 			*fu = nil
 			return [][]byte{n}
+		}
+	}
+	return nil
+}
+
+// Unpack returns every H264 NAL in one RTP payload (single, STAP-A, FU-A).
+// Unlike NALs, this includes video slices, not only SEI.
+func Unpack(payload []byte, fu *[]byte) [][]byte {
+	if len(payload) < 1 {
+		return nil
+	}
+	switch payload[0] & 0x1f {
+	case 24:
+		var out [][]byte
+		off := 1
+		for off+2 <= len(payload) {
+			n := int(payload[off])<<8 | int(payload[off+1])
+			off += 2
+			if n <= 0 || off+n > len(payload) {
+				break
+			}
+			out = append(out, payload[off:off+n])
+			off += n
+		}
+		return out
+	case 28:
+		if len(payload) < 2 {
+			return nil
+		}
+		hdr := payload[1]
+		orig := hdr & 0x1f
+		if hdr&0x80 != 0 {
+			*fu = append([]byte{payload[0]&0xe0 | orig}, payload[2:]...)
+		} else if len(*fu) > 0 {
+			*fu = append(*fu, payload[2:]...)
+		}
+		if hdr&0x40 != 0 && len(*fu) > 0 {
+			n := *fu
+			*fu = nil
+			return [][]byte{n}
+		}
+		return nil
+	default:
+		if t := payload[0] & 0x1f; t >= 1 && t <= 23 {
+			return [][]byte{payload}
 		}
 	}
 	return nil
