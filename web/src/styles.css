@@ -758,6 +758,44 @@ main { flex: 1; position: relative; min-height: 0; }
 .box ul { margin: 0; padding-right: 18px; }
 .nav { display: flex; gap: 8px; margin-top: 12px; }
 
+.scenario {
+  display: grid;
+  place-items: center;
+  padding: 24px 16px;
+  overflow: auto;
+}
+
+.scenario form {
+  width: min(560px, 100%);
+  display: grid;
+  gap: 12px;
+}
+
+.scenario h2 { margin: 0; font-size: 20px; text-align: center; }
+
+.scenario label {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+  text-align: right;
+}
+
+.scenario input,
+.scenario select {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #0a1118;
+  color: var(--text);
+  padding: 8px 10px;
+  font: 13px "IBM Plex Mono", monospace;
+  direction: ltr;
+}
+
+.scenario .row { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+.scenario .err { margin: 0; color: var(--rose); text-align: center; }
+.scenario a { color: var(--cyan); }
+
 @media (max-width: 1100px) {
   #inside { grid-template-columns: 1fr; grid-template-rows: minmax(280px, 42vh) minmax(120px, 22vh) 1fr; }
   .viz, .rail { border-right: 0; border-bottom: 1px solid var(--line); }

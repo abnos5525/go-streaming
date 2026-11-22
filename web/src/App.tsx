@@ -2,9 +2,12 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Glossary } from "@/GlossaryDialog";
 import { Inside } from "@/Inside";
+import { Scenario } from "@/Scenario";
+
+type View = "map" | "inside" | "scenario";
 
 export default function App() {
-  const [inside, setInside] = useState(false);
+  const [view, setView] = useState<View>("map");
   const [gloss, setGloss] = useState(false);
 
   return (
@@ -13,19 +16,21 @@ export default function App() {
         <div>
           <h1>فلو زندهٔ go-streaming</h1>
           <p>
-            {inside
+            {view === "inside"
               ? "داخل go-streaming · قدم‌ها و فایل‌ها"
-              : "نقشهٔ کلی سیستم · برای ورود روی go-streaming کلیک کن"}
+              : view === "scenario"
+                ? "سناریوی پخش · Start و Stop روی API"
+                : "نقشهٔ کلی سیستم · برای ورود روی go-streaming کلیک کن"}
           </p>
         </div>
-        {inside ? (
-          <Button type="button" onClick={() => setInside(false)}>
+        {view !== "map" ? (
+          <Button type="button" onClick={() => setView("map")}>
             ↩ برگشت به نقشه
           </Button>
         ) : null}
       </header>
       <main>
-        <section id="world" className={inside ? "scene" : "scene on"} aria-label="نقشه کلی">
+        <section id="world" className={view === "map" ? "scene on" : "scene"} aria-label="نقشه کلی">
           <div className="hero">
             <p className="hero-kicker">جریان واقعی محصول شما</p>
             <div className="flow-row">
@@ -42,11 +47,11 @@ export default function App() {
                 tabIndex={0}
                 role="button"
                 aria-label="ورود به داخل go-streaming"
-                onClick={() => setInside(true)}
+                onClick={() => setView("inside")}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
-                    setInside(true);
+                    setView("inside");
                   }
                 }}
               >
@@ -82,13 +87,17 @@ export default function App() {
               >
                 کلمات کلیدی
               </Button>
+              <Button type="button" className="btn primary" onClick={() => setView("scenario")}>
+                سناریوی پخش
+              </Button>
             </div>
             <p className="world-hint">
               الان فقط نقشهٔ بیرون را می‌بینی. برای دیدن فایل‌ها و متدها روی <b>go-streaming</b> کلیک کن. واژه‌ها را از دکمهٔ بالا مرور کن.
             </p>
           </div>
         </section>
-        {inside ? <Inside /> : <section id="inside" className="scene" aria-label="فایل‌ها و متدها" />}
+        {view === "inside" ? <Inside /> : null}
+        {view === "scenario" ? <Scenario /> : null}
       </main>
       {gloss ? <Glossary onClose={() => setGloss(false)} /> : null}
     </>

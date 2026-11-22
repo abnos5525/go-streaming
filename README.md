@@ -50,21 +50,22 @@ Server listens on **http://127.0.0.1:8085**.
 
 ### Docs site
 
-The home page is a React walkthrough of the same pipeline. It does not need the Go server.
+The home page is a React walkthrough. Install [pnpm](https://pnpm.io/installation) once, then:
 
 ```bash
 cd web
-npm install
-npm run dev
+pnpm install
+pnpm dev
 ```
 
 Open **http://127.0.0.1:5173**.
 
 1. The map is Record → go-streaming → React. **کلمات کلیدی** opens the glossary and lights the matching station.
-2. Click the **go-streaming** card. The inside view has 24 steps: file, method, plain explanation, and the media/control planes light up with the step.
-3. **↩ برگشت به نقشه** returns to the map.
+2. Click the **go-streaming** card. The inside view has 24 steps: file, method, and the media/control planes for that step.
+3. **سناریوی پخش** calls the live API. Start the Go server first (`go run .` on port `8085`), then Start with a real `udp`/`rtsp` URL. The page shows the playback URL and a link to `/play/{id}`. Stop sends `POST /stream/stop` for the same source URL.
+4. **↩ برگشت به نقشه** returns to the map.
 
-`npm run build` typechecks and writes `web/dist`.
+`pnpm build` typechecks and writes `web/dist`. The lockfile is `web/pnpm-lock.yaml`. Do not use npm.
 
 ### 1. Start a stream
 

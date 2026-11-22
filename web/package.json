@@ -1,6 +1,8 @@
 {
   "name": "go-streaming-docs",
   "private": true,
+  "packageManager": "pnpm@10.13.1",
+  "packageManager": "pnpm@10.13.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
