@@ -797,7 +797,9 @@ main { flex: 1; position: relative; min-height: 0; }
 .scenario a { color: var(--cyan); }
 .scenario video.live {
   width: 100%;
+  aspect-ratio: 16 / 9;
   max-height: 360px;
+  object-fit: contain;
   background: #000;
   border-radius: 12px;
 }

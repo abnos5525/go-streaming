@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { LiveView } from "@/LiveView";
 
@@ -33,6 +33,7 @@ export function Scenario() {
   const [gate, setGate] = useState("");
   const [liveError, setLiveError] = useState("");
   const [busy, setBusy] = useState(false);
+  const viewRef = useRef<HTMLDivElement>(null);
 
   const origin = api.replace(/\/$/, "");
   const player = mediaURL ? playURL(mediaURL) : "";
@@ -62,6 +63,11 @@ export function Scenario() {
     }, 2000);
     return () => window.clearInterval(timer);
   }, [mediaURL, origin]);
+
+  useEffect(() => {
+    if (!mediaURL) return;
+    viewRef.current?.scrollIntoView({ block: "center" });
+  }, [mediaURL]);
 
   async function start() {
     setBusy(true);
@@ -168,7 +174,7 @@ export function Scenario() {
         </div>
         {error ? <p className="err">{error}</p> : null}
         {mediaURL ? (
-          <div className="box">
+          <div className="box" ref={viewRef}>
             <h4>پاسخ سرور</h4>
             <p className="prose">
               <a href={mediaURL}>{mediaURL}</a>
