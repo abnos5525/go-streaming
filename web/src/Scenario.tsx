@@ -5,8 +5,8 @@ import { LiveView } from "@/LiveView";
 type StartBody = { url: string; output_type: number };
 
 const defaultAPI = "http://127.0.0.1:8085";
-const demoCamera = "udp://127.0.0.1:5600";
-const wowzaCamera = "rtsp://9627b0bf2a7b.entrypoint.cloud.wowza.com:1935/app-p5260J38/66abe4b9_stream1";
+const demoCamera = "rtsp://stream.strba.sk:1935/strba/VYHLAD_JAZERO.stream";
+const localCamera = "udp://127.0.0.1:5600";
 
 function streamId(mediaURL: string) {
   return mediaURL.match(/\/(?:hls|webrtc)\/([0-9a-f]{16})\//i)?.[1] ?? "";
@@ -139,13 +139,13 @@ export function Scenario() {
           آدرس منبع
           <input value={source} onChange={(event) => setSource(event.target.value)} spellCheck={false} />
         </label>
-        <p className="world-hint">آدرس پیش‌فرض تصویر محلی است و Start همین را پخش می‌کند. دوربین Wowza از این شبکه ۴۰۳ می‌دهد و تصویر ندارد.</p>
+        <p className="world-hint">آدرس پیش‌فرض دوربین عمومی دریاچهٔ شتربا است. Start همان تصویر زنده را پخش می‌کند. دکمهٔ تصویر محلی توپ آزمایشی را می‌گذارد.</p>
         <div className="row">
           <Button type="button" disabled={busy} onClick={() => setSource(demoCamera)}>
-            تصویر محلی
+            دوربین دریاچه
           </Button>
-          <Button type="button" disabled={busy} onClick={() => setSource(wowzaCamera)}>
-            دوربین Wowza
+          <Button type="button" disabled={busy} onClick={() => setSource(localCamera)}>
+            تصویر محلی
           </Button>
         </div>
         <label>

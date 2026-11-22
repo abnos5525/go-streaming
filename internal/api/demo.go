@@ -7,7 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const demoCamera = "udp://127.0.0.1:5600"
+const demoCamera = "rtsp://stream.strba.sk:1935/strba/VYHLAD_JAZERO.stream"
 
 func registerDemo(r *gin.Engine) {
 	r.GET("/demo", serveDemo)
@@ -19,7 +19,7 @@ func serveDemo(c *gin.Context) {
 		url = demoCamera
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"name":        "local test camera",
+		"name":        "strba lake camera",
 		"url":         url,
 		"output_type": 6,
 	})

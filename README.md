@@ -179,7 +179,13 @@ grpcurl -plaintext 127.0.0.1:9095 stream.v1.Control/Status
 
 ### Demo camera
 
-`GET /demo` and the scenario source field use the local H264 test picture on `udp://127.0.0.1:5600`. The official Wowza RTSP URL returns 403 from this network, so it is only a second button and does not play. Publish the local picture with GStreamer before pressing Start:
+`GET /demo` and the scenario source field use a public lake webcam:
+
+```text
+rtsp://stream.strba.sk:1935/strba/VYHLAD_JAZERO.stream
+```
+
+Start plays that H.264 picture. The scenario button «تصویر محلی» switches to `udp://127.0.0.1:5600`. Publish that picture with GStreamer only if you use the local button:
 
 ```powershell
 gst-launch-1.0 videotestsrc is-live=true pattern=ball ! video/x-raw,width=640,height=360,framerate=25/1 ! x264enc tune=zerolatency bitrate=800 speed-preset=ultrafast key-int-max=25 ! rtph264pay pt=96 config-interval=1 ! udpsink host=127.0.0.1 port=5600
