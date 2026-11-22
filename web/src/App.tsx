@@ -1,14 +1,7 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Glossary } from "@/GlossaryDialog";
-
-type BootStep = { step: string; name: string; detail: string };
-
-const boot: BootStep[] = [
-  { step: "قدم ۱", name: "config.Load()", detail: "خواندن .env و آدرس گوش دادن" },
-  { step: "قدم ۲", name: "gin + CORS", detail: "ساخت روتر و باز کردن مرورگر روی origin دیگر" },
-  { step: "قدم ۳", name: "Listen :8085", detail: "آماده برای LL-HLS و WebRTC" },
-];
+import { Inside } from "@/Inside";
 
 export default function App() {
   const [inside, setInside] = useState(false);
@@ -21,7 +14,7 @@ export default function App() {
           <h1>فلو زندهٔ go-streaming</h1>
           <p>
             {inside
-              ? "بوت سرور · سه قدم اول تا Listen"
+              ? "داخل go-streaming · قدم‌ها و فایل‌ها"
               : "نقشهٔ کلی سیستم · برای ورود روی go-streaming کلیک کن"}
           </p>
         </div>
@@ -95,19 +88,7 @@ export default function App() {
             </p>
           </div>
         </section>
-        <section id="inside" className={inside ? "scene on" : "scene"} aria-label="بوت سرور">
-          <div className="boot">
-            {boot.map((item) => (
-              <article key={item.name}>
-                <em>{item.step}</em>
-                <div>
-                  <b>{item.name}</b>
-                  <span>{item.detail}</span>
-                </div>
-              </article>
-            ))}
-          </div>
-        </section>
+        {inside ? <Inside /> : <section id="inside" className="scene" aria-label="فایل‌ها و متدها" />}
       </main>
       {gloss ? <Glossary onClose={() => setGloss(false)} /> : null}
     </>

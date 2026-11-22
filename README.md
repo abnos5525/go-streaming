@@ -48,6 +48,24 @@ go run .
 
 Server listens on **http://127.0.0.1:8085**.
 
+### Docs site
+
+The home page is a React walkthrough of the same pipeline. It does not need the Go server.
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+Open **http://127.0.0.1:5173**.
+
+1. The map is Record → go-streaming → React. **کلمات کلیدی** opens the glossary and lights the matching station.
+2. Click the **go-streaming** card. The inside view has 24 steps: file, method, plain explanation, and the media/control planes light up with the step.
+3. **↩ برگشت به نقشه** returns to the map.
+
+`npm run build` typechecks and writes `web/dist`.
+
 ### 1. Start a stream
 
 Default multicast example (change to your camera URL):
