@@ -795,6 +795,12 @@ main { flex: 1; position: relative; min-height: 0; }
 .scenario .row { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
 .scenario .err { margin: 0; color: var(--rose); text-align: center; }
 .scenario a { color: var(--cyan); }
+.scenario video.live {
+  width: 100%;
+  max-height: 360px;
+  background: #000;
+  border-radius: 12px;
+}
 
 @media (max-width: 1100px) {
   #inside { grid-template-columns: 1fr; grid-template-rows: minmax(280px, 42vh) minmax(120px, 22vh) 1fr; }

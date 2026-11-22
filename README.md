@@ -171,7 +171,7 @@ On PowerShell, set the variable in the same window before both commands, or rely
 
 ```bash
 grpcurl -plaintext 127.0.0.1:9095 list
-grpcurl -plaintext -d "{\"url\":\"rtsp://9627b0bf2a7b.entrypoint.cloud.wowza.com:1935/app-p5260J38/66abe4b9_stream1\",\"output_type\":6}" 127.0.0.1:9095 stream.v1.Control/Start
+grpcurl -plaintext -d "{\"url\":\"udp://127.0.0.1:5600\",\"output_type\":6}" 127.0.0.1:9095 stream.v1.Control/Start
 grpcurl -plaintext 127.0.0.1:9095 stream.v1.Control/Status
 ```
 
@@ -179,7 +179,19 @@ grpcurl -plaintext 127.0.0.1:9095 stream.v1.Control/Status
 
 ### Demo camera
 
-`GET /demo` returns the camera in `DEMO_CAMERA_URL`. The docs scenario fills that URL on load. It is Wowza's public H264 RTSP test loop, not a private camera. RTSP ingest needs `gst-launch-1.0` on PATH. If that host is down, replace `DEMO_CAMERA_URL` in `.env`.
+`GET /demo` and the scenario source field use the official Wowza test camera:
+
+```text
+rtsp://9627b0bf2a7b.entrypoint.cloud.wowza.com:1935/app-p5260J38/66abe4b9_stream1
+```
+
+From this network that host answers RTSP SETUP with 403, so Start does not show a picture. The scenario button «تصویر محلی» switches the field to `udp://127.0.0.1:5600`. Publish that picture with GStreamer before pressing Start:
+
+```powershell
+gst-launch-1.0 videotestsrc is-live=true pattern=ball ! video/x-raw,width=640,height=360,framerate=25/1 ! x264enc tune=zerolatency bitrate=800 speed-preset=ultrafast key-int-max=25 ! rtph264pay pt=96 config-interval=1 ! udpsink host=127.0.0.1 port=5600
+```
+
+RTSP ingest needs `gst-launch-1.0` on PATH. This machine uses the extracted runtime at `D:\gstreamer\PFiles64\gstreamer\1.0\msvc_x86_64`. The user PATH and `GST_PLUGIN_PATH` point there. The play page loads hls.js from `/vendor/hls.min.js` on the same server, and the docs scenario plays the picture in the page.
 
 ---
 

@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { LiveView } from "@/LiveView";
 
 type StartBody = { url: string; output_type: number };
 
 const defaultAPI = "http://127.0.0.1:8085";
 const demoCamera = "rtsp://9627b0bf2a7b.entrypoint.cloud.wowza.com:1935/app-p5260J38/66abe4b9_stream1";
+const localCamera = "udp://127.0.0.1:5600";
 
 function streamId(mediaURL: string) {
   return mediaURL.match(/\/(?:hls|webrtc)\/([0-9a-f]{16})\//i)?.[1] ?? "";
@@ -29,6 +31,7 @@ export function Scenario() {
   const [error, setError] = useState("");
   const [token, setToken] = useState("");
   const [gate, setGate] = useState("");
+  const [liveError, setLiveError] = useState("");
   const [busy, setBusy] = useState(false);
 
   const origin = api.replace(/\/$/, "");
@@ -44,6 +47,21 @@ export function Scenario() {
       .catch(() => {});
     return () => ac.abort();
   }, [origin]);
+
+  useEffect(() => {
+    const id = streamId(mediaURL);
+    if (!id) return;
+    const timer = window.setInterval(() => {
+      void fetch(`${origin}/stream/meta/${id}`)
+        .then(async (res) => {
+          if (!res.ok) return;
+          const meta = (await res.json()) as { error?: string };
+          setLiveError(meta.error ?? "");
+        })
+        .catch(() => undefined);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [mediaURL, origin]);
 
   async function start() {
     setBusy(true);
@@ -121,7 +139,15 @@ export function Scenario() {
           آدرس منبع
           <input value={source} onChange={(event) => setSource(event.target.value)} spellCheck={false} />
         </label>
-        <p className="world-hint">دوربین پیش‌فرض یک استریم عمومی H264 است. پخش RTSP روی این سرور به GStreamer نیاز دارد.</p>
+        <p className="world-hint">آدرس پیش‌فرض دوربین آزمایشی عمومی Wowza است. از این شبکه پاسخ ۴۰۳ می‌دهد. دکمهٔ تصویر محلی توپ متحرک را می‌گذارد که همین صفحه پخش می‌کند.</p>
+        <div className="row">
+          <Button type="button" disabled={busy} onClick={() => setSource(demoCamera)}>
+            دوربین Wowza
+          </Button>
+          <Button type="button" disabled={busy} onClick={() => setSource(localCamera)}>
+            تصویر محلی
+          </Button>
+        </div>
         <label>
           نوع خروجی
           <select
@@ -147,11 +173,8 @@ export function Scenario() {
             <p className="prose">
               <a href={mediaURL}>{mediaURL}</a>
             </p>
-            {player ? (
-              <p className="prose">
-                <a href={player}>باز کردن پلیر</a>
-              </p>
-            ) : null}
+            {player ? <LiveView origin={origin} mediaURL={mediaURL} outputType={outputType} /> : null}
+            {liveError ? <p className="err">{liveError}</p> : null}
           </div>
         ) : null}
         <label>

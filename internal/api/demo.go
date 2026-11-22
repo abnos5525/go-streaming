@@ -19,7 +19,7 @@ func serveDemo(c *gin.Context) {
 		url = demoCamera
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"name":        "Wowza public RTSP test",
+		"name":        "wowza test camera",
 		"url":         url,
 		"output_type": 6,
 	})

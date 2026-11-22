@@ -13,4 +13,5 @@ func Register(r *gin.Engine) {
 	})
 	registerStream(r)
 	registerDemo(r)
+	registerVendor(r)
 }

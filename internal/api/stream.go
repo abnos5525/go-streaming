@@ -132,7 +132,7 @@ func playPage(id string) string {
 <meta charset="utf-8">
 <style>` + playerCSS + `</style>
 <div class="wrap"><video id="v" autoplay playsinline muted controls></video><canvas id="o"></canvas><div class="tag">LL-HLS</div></div>
-<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+<script src="/vendor/hls.min.js"></script>
 <script>
 const src = '` + src + `';
 const v = document.getElementById('v');

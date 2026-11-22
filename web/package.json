@@ -2,7 +2,6 @@
   "name": "go-streaming-docs",
   "private": true,
   "packageManager": "pnpm@10.13.1",
-  "packageManager": "pnpm@10.13.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -13,6 +12,7 @@
     "@radix-ui/react-slot": "^1.2.4",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "hls.js": "^1.7.4",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "tailwind-merge": "^3.4.0"
