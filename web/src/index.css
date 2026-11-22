@@ -1,0 +1,19 @@
+@layer theme, base, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+@theme {
+  --color-bg: #0b1218;
+  --color-panel: #121c26;
+  --color-line: #243445;
+  --color-text: #e7eef6;
+  --color-muted: #8aa0b5;
+  --color-cyan: #3de0c5;
+  --color-amber: #f0b429;
+  --color-ok: #7dffa6;
+  --color-dim: #15202c;
+  --color-rose: #ff8a9a;
+  --font-sans: Vazirmatn, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
