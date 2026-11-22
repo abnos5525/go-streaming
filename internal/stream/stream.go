@@ -52,35 +52,36 @@ func hlsSegList() int {
 func aiDelayMS() int64 { return 3 * hls.PartMin.Milliseconds() }
 
 type session struct {
-	url, id, last  string
-	proc           *os.Process
-	gen            int
-	running        bool
-	spsB64         string
-	ppsB64         string
-	mp4Proc        *os.Process
-	mp4Hub         *mp4Hub
-	rtcHub         *rtc.Hub
-	tracks         []Track
-	rtpTS          atomic.Uint32
-	delayMS        atomic.Int64
-	buf            []*ai.AIFrame
-	arr            []int64 // server arrival ms per buf entry (same order)
-	out            int     // 6 = LL-HLS, 7 = WebRTC; latest start is /play only
-	wantRTC        bool
-	ll             *hls.Hub
-	llReady        atomic.Bool
-	llNeedIDR      atomic.Bool // set on llCh drop; skip WriteH264 until next IDR
-	spsNAL, ppsNAL []byte
-	llFU           []byte
-	llAU           hls.Acc
-	llCh           chan []byte
-	ovSig          chan struct{}
-	mc             *net.UDPConn
-	viewers        map[string]*rtcViewer // per-person signaling + data channel
-	aiViaLogged    bool
-	aiCh           chan *ai.AIFrame // off sniff: raw-json must not stall UDP Read
-	sei            []h264.SEI       // latest SEI messages from H264 NAL type 6
+	url, id, last        string
+	proc                 *os.Process
+	gen                  int
+	running              bool
+	spsB64               string
+	ppsB64               string
+	mp4Proc              *os.Process
+	mp4Hub               *mp4Hub
+	rtcHub               *rtc.Hub
+	tracks               []Track
+	rtpTS                atomic.Uint32
+	delayMS              atomic.Int64
+	buf                  []*ai.AIFrame
+	arr                  []int64 // server arrival ms per buf entry (same order)
+	out                  int     // 6 = LL-HLS, 7 = WebRTC; latest start is /play only
+	wantRTC              bool
+	ll                   *hls.Hub
+	llReady              atomic.Bool
+	llNeedIDR            atomic.Bool // set on llCh drop; skip WriteH264 until next IDR
+	spsNAL, ppsNAL       []byte
+	rtcSpsNAL, rtcPpsNAL []byte // WebRTC remux tap (Baseline); LL-HLS keeps spsNAL (Main)
+	llFU                 []byte
+	llAU                 hls.Acc
+	llCh                 chan []byte
+	ovSig                chan struct{}
+	mc                   *net.UDPConn
+	viewers              map[string]*rtcViewer // per-person signaling + data channel
+	aiViaLogged          bool
+	aiCh                 chan *ai.AIFrame // off sniff: raw-json must not stall UDP Read
+	sei                  []h264.SEI       // latest SEI messages from H264 NAL type 6
 }
 
 type Track struct {
@@ -361,14 +362,16 @@ func (s *session) setLaneLocked(outputType int) error {
 
 func (s *session) ensureRTCLocked() error {
 	if s.rtcHub != nil {
-		s.rtcHub.SetParams(s.spsNAL, s.ppsNAL)
+		sps, pps := s.rtcCodecParams()
+		s.rtcHub.SetParams(sps, pps)
 		return nil
 	}
 	hub, err := rtc.NewHub(s.h264Cap())
 	if err != nil {
 		return err
 	}
-	hub.SetParams(s.spsNAL, s.ppsNAL)
+	sps, pps := s.rtcCodecParams()
+	hub.SetParams(sps, pps)
 	s.rtcHub = hub
 	return nil
 }
@@ -416,35 +419,47 @@ func (s *session) loop(my int) {
 	if sniffed {
 		ingest = "sniff"
 	} else {
-		go s.hlsRemux(my, in)
-		go s.rtcRemux(my, in)
+		go s.shareRemux(my, in)
 	}
 	logStream("START", id, u, "lane=%s ingest=%s play=%s", laneLabel(lane), ingest, browserPlay(id))
 }
 
 // hlsRemux is RTSP / failed-join only. The multicast path writes AUs
 // from sniff into gohlslib (no remuxer).
-func (s *session) hlsRemux(my int, in string) {
+func (s *session) shareRemux(my int, in string) {
 	for s.alive(my) {
-		if !s.want(my, 6) {
+		if !s.wantEither(my) {
 			time.Sleep(200 * time.Millisecond)
 			continue
 		}
-		if _, err := exec.LookPath("gst-launch-1.0"); err != nil {
+		if err := gstLaunchOK(); err != nil {
 			s.set("gst-launch-1.0 not in PATH")
 			time.Sleep(2 * time.Second)
 			continue
 		}
-		rconn, port, err := bindRTCPort(s.id)
+		hconn, hport, err := bindRTCPort(s.id)
 		if err != nil {
 			s.set(err.Error())
 			time.Sleep(2 * time.Second)
 			continue
 		}
-		go s.pumpLL(my, rconn)
-		s.runFF(my, 6, gstRTPCmd(in, port))
+		rconn, rport, err := bindRTCPort(s.id)
+		if err != nil {
+			_ = hconn.Close()
+			s.set(err.Error())
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		go s.pumpLL(my, hconn)
+		go s.pumpRTP(my, rconn, nil)
+		s.runFF(my, 0, gstRTPCmd(in, hport, rport))
+		_ = hconn.Close()
 		_ = rconn.Close()
 	}
+}
+
+func (s *session) wantEither(my int) bool {
+	return s.want(my, 6) || s.want(my, 7)
 }
 
 func (s *session) pumpLL(my int, conn net.PacketConn) {
@@ -459,9 +474,6 @@ func (s *session) pumpLL(my int, conn net.PacketConn) {
 		n, _, err := conn.ReadFrom(buf)
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				if !s.want(my, 6) {
-					return
-				}
 				continue
 			}
 			return
@@ -470,43 +482,10 @@ func (s *session) pumpLL(my int, conn net.PacketConn) {
 	}
 }
 
-// rtcRemux is only for sources sniff cannot take (RTSP, or multicast
-// join failed). The company UDP path writes RTP straight into pion.
-func (s *session) rtcRemux(my int, in string) {
-	for s.alive(my) {
-		if !s.want(my, 7) {
-			time.Sleep(200 * time.Millisecond)
-			continue
-		}
-		if _, err := exec.LookPath("gst-launch-1.0"); err != nil {
-			s.set("gst-launch-1.0 not in PATH")
-			time.Sleep(2 * time.Second)
-			continue
-		}
-		rconn, port, err := bindRTCPort(s.id)
-		if err != nil {
-			s.set(err.Error())
-			time.Sleep(2 * time.Second)
-			continue
-		}
-		mu.Lock()
-		hub := s.rtcHub
-		mu.Unlock()
-		if hub == nil {
-			_ = rconn.Close()
-			time.Sleep(200 * time.Millisecond)
-			continue
-		}
-		go s.pumpRTP(my, rconn, hub)
-		s.runFF(my, 7, gstRTPCmd(in, port))
-		_ = rconn.Close()
-	}
-}
-
 func (s *session) runFF(my, typ int, cmd *exec.Cmd) {
 	var stderr bytes.Buffer
 	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
-	logStream("INFO", s.id, s.url, "gst %s port-cmd ready", laneLabel(typ))
+	logStream("INFO", s.id, s.url, "gst %s port-cmd ready", runLabel(typ))
 	if err := cmd.Start(); err != nil {
 		s.set("gst start: " + err.Error())
 		time.Sleep(2 * time.Second)
@@ -529,7 +508,7 @@ func (s *session) runFF(my, typ int, cmd *exec.Cmd) {
 		case err = <-done:
 			goto ended
 		case <-time.After(200 * time.Millisecond):
-			if !s.want(my, typ) {
+			if !s.keepRun(my, typ) {
 				_ = cmd.Process.Kill()
 				err = <-done
 				goto ended
@@ -537,12 +516,12 @@ func (s *session) runFF(my, typ int, cmd *exec.Cmd) {
 		}
 	}
 ended:
+	keep := s.keepRun(my, typ)
 	mu.Lock()
 	if s.proc == cmd.Process {
 		s.proc = nil
 	}
 	alive := s.gen == my
-	keep := (typ == 6 && (s.ll != nil || s.out == 6)) || (typ == 7 && (s.wantRTC || s.rtcHub != nil || s.out == 7))
 	mu.Unlock()
 	if !alive || !keep {
 		return
@@ -552,9 +531,9 @@ ended:
 		if msg == "" {
 			msg = err.Error()
 		}
-		s.set("gst " + laneLabel(typ) + ": " + msg)
+		s.set("gst " + runLabel(typ) + ": " + msg)
 	} else {
-		s.set("gst " + laneLabel(typ) + " exited")
+		s.set("gst " + runLabel(typ) + " exited")
 	}
 	time.Sleep(2 * time.Second)
 }
@@ -806,6 +785,20 @@ func publicBase() string {
 
 func browserPlay(id string) string {
 	return publicBase() + "/play/" + id
+}
+
+func (s *session) keepRun(my, typ int) bool {
+	if typ == 0 {
+		return s.wantEither(my)
+	}
+	return s.want(my, typ)
+}
+
+func runLabel(t int) string {
+	if t == 0 {
+		return "ingest"
+	}
+	return laneLabel(t)
 }
 
 func laneLabel(t int) string {

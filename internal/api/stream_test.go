@@ -31,8 +31,8 @@ func TestPlayerPagesAreSingleLane(t *testing.T) {
 	if strings.Count(rtc, "<video") != 1 || strings.Contains(rtc, "hls.js") || strings.Contains(rtc, "index.m3u8") {
 		t.Fatal("output_type 7 must be WebRTC only")
 	}
-	if !strings.Contains(rtc, "iceServers:[]") || !strings.Contains(rtc, "setTimeout(r, 800)") {
-		t.Fatal("WebRTC page must not stall on blocked STUN gathering")
+	if !strings.Contains(rtc, "stun.services.mozilla.com") || !strings.Contains(rtc, "setTimeout(r, 800)") {
+		t.Fatal("WebRTC page must use Mozilla STUN on localhost without stalling gather")
 	}
 	if !strings.Contains(rtc, "new MediaStream([e.track])") {
 		t.Fatal("Firefox ontrack often has empty streams")

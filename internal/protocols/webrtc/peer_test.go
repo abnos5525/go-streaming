@@ -36,6 +36,28 @@ func TestIceGatherWait(t *testing.T) {
 	}
 }
 
+func TestPrepareOfferLoopback(t *testing.T) {
+	line := "a=candidate:1 1 UDP 2122252543 abc-123.local 54321 typ host"
+	sdp := "v=0\r\n" + line + "\r\n"
+	got := PrepareOfferSDP(sdp, true)
+	if !contains(got, "127.0.0.1 54321") || contains(got, ".local") {
+		t.Fatalf("loopback must map mDNS to 127.0.0.1: %q", got)
+	}
+}
+
+func contains(s, sub string) bool {
+	return len(sub) == 0 || len(s) >= len(sub) && stringIndex(s, sub) >= 0
+}
+
+func stringIndex(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}
+
 func TestICEIPDropsDocker(t *testing.T) {
 	if IceIP(net.ParseIP("172.17.0.1")) || IceIP(net.ParseIP("172.24.0.1")) || IceIP(net.ParseIP("127.0.0.1")) {
 		t.Fatal("docker/loopback must not be ICE host candidates")

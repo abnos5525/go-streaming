@@ -191,7 +191,7 @@ Start plays that H.264 picture. The scenario button «تصویر محلی» swit
 gst-launch-1.0 videotestsrc is-live=true pattern=ball ! video/x-raw,width=640,height=360,framerate=25/1 ! x264enc tune=zerolatency bitrate=800 speed-preset=ultrafast key-int-max=25 ! rtph264pay pt=96 config-interval=1 ! udpsink host=127.0.0.1 port=5600
 ```
 
-RTSP ingest needs `gst-launch-1.0` on PATH. This machine uses the extracted runtime at `D:\gstreamer\PFiles64\gstreamer\1.0\msvc_x86_64`. The user PATH and `GST_PLUGIN_PATH` point there. The play page loads hls.js from `/vendor/hls.min.js` on the same server, and the docs scenario plays the picture in the page.
+RTSP ingest needs GStreamer. Set `GST_ROOT` in `.env` to the install root (for example `D:\gstreamer\PFiles64\gstreamer\1.0\msvc_x86_64`) or put `gst-launch-1.0` on PATH. `GST_ROOT` also sets plugin paths for child pipelines. The play page loads hls.js from `/vendor/hls.min.js` on the same server, and the docs scenario plays the picture in the page.
 
 ---
 

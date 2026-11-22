@@ -4,6 +4,7 @@
 package stream
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
 	"net"
@@ -237,6 +238,37 @@ func (s *session) fanout(pkt []byte, _ *net.UDPConn) {
 	}
 }
 
+// learnRTCVideoParams harvests SPS/PPS from the WebRTC gst tap (often Baseline).
+func (s *session) learnRTCVideoParams(nals [][]byte) {
+	mu.Lock()
+	defer mu.Unlock()
+	var changed bool
+	for _, n := range nals {
+		if len(n) < 2 {
+			continue
+		}
+		switch n[0] & 0x1f {
+		case 7:
+			if !bytes.Equal(s.rtcSpsNAL, n) {
+				s.rtcSpsNAL = append([]byte(nil), n...)
+				s.stampSizeFromSPSLocked(n)
+				changed = true
+			}
+		case 8:
+			if !bytes.Equal(s.rtcPpsNAL, n) {
+				s.rtcPpsNAL = append([]byte(nil), n...)
+				changed = true
+			}
+		}
+	}
+	if !changed || len(s.rtcSpsNAL) == 0 || len(s.rtcPpsNAL) == 0 {
+		return
+	}
+	if s.rtcHub != nil {
+		s.rtcHub.SetParams(s.rtcSpsNAL, s.rtcPpsNAL)
+	}
+}
+
 // learnVideoParams harvests SPS/PPS from Unpack NALs: full units for WebRTC
 // CapFrom / HLS prepend, overlay size, RTC refresh, and once both exist also
 // base64 + rewrite in.sdp (relay decoder needs sprop-parameter-sets).
@@ -251,12 +283,16 @@ func (s *session) learnVideoParams(nals [][]byte) {
 			if s.spsNAL == nil {
 				s.spsNAL = append([]byte(nil), n...)
 				s.stampSizeFromSPSLocked(n)
-				s.refreshRTCCodecLocked()
+				if s.mc != nil {
+					s.refreshRTCCodecLocked()
+				}
 			}
 		case 8:
 			if s.ppsNAL == nil {
 				s.ppsNAL = append([]byte(nil), n...)
-				s.refreshRTCCodecLocked()
+				if s.mc != nil {
+					s.refreshRTCCodecLocked()
+				}
 			}
 		}
 	}

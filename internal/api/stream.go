@@ -6,9 +6,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/abnos5525/go-streaming/internal/stream"
 	"github.com/gin-gonic/gin"
 	"github.com/pion/webrtc/v4"
-	"github.com/abnos5525/go-streaming/internal/stream"
 )
 
 // rtcOffer is a browser SDP offer; only type "offer" is accepted.
@@ -185,7 +185,9 @@ async function startRTC() {
       const vr = await fetch('/webrtc/` + id + `/viewers', {method:'POST'});
       if (!vr.ok) throw new Error('viewer ' + vr.status);
       const slot = await vr.json();
-      pc = new RTCPeerConnection({iceServers:[]});
+      const local = location.hostname === '127.0.0.1' || location.hostname === 'localhost' || location.hostname === '[::1]';
+      const iceServers = local ? [{urls: 'stun:stun.services.mozilla.com:3478'}] : [];
+      pc = new RTCPeerConnection({iceServers});
       const ovdc = pc.createDataChannel(slot.channel, {negotiated:true, id: slot.dc_id});
       ovdc.onmessage = e => { try { feedOv(JSON.parse(e.data)); } catch (x) {} };
       pc.ontrack = e => { try { e.receiver.jitterBufferTarget = 200; e.receiver.playoutDelayHint = 0.2; } catch (x) {} v.srcObject = (e.streams && e.streams[0]) ? e.streams[0] : new MediaStream([e.track]); v.play().catch(()=>{}); };
@@ -193,7 +195,8 @@ async function startRTC() {
       try {
         const tr = pc.getTransceivers()[0];
         const cs = RTCRtpReceiver.getCapabilities('video');
-        if (tr && tr.setCodecPreferences && cs) {
+        const ff = /Firefox\\//i.test(navigator.userAgent);
+        if (!ff && tr && tr.setCodecPreferences && cs) {
           const pref = [];
           const add = xs => { for (const c of xs) if (!pref.includes(c)) pref.push(c); };
           const h = cs.codecs.filter(c => /H264/i.test(c.mimeType) && /packetization-mode=1/.test(c.sdpFmtpLine||''));
@@ -222,8 +225,16 @@ async function startRTC() {
         }),
         new Promise(r => setTimeout(r, 800))
       ]);
+      let offerSdp = pc.localDescription.sdp.replaceAll('packetization-mode=0', 'packetization-mode=1');
+      offerSdp = offerSdp.split(/\r?\n/).filter(l => {
+        if (!l.startsWith('a=candidate:')) return true;
+        if (!ff && l.indexOf('.local') >= 0) return false;
+        if (/\s169\.254\./.test(l)) return false;
+        if (/\s172\.(1[6-9]|2\d|3[01])\./.test(l)) return false;
+        return true;
+      }).join('\r\n');
       const r = await fetch(slot.offer, {method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({sdp: pc.localDescription.sdp, type: pc.localDescription.type})});
+        body: JSON.stringify({sdp: offerSdp, type: pc.localDescription.type})});
       if (!r.ok) throw new Error('offer ' + r.status);
       await pc.setRemoteDescription(await r.json());
       await new Promise((res, rej) => {
@@ -325,7 +336,7 @@ func registerStream(r *gin.Engine) {
 		if !ok {
 			return
 		}
-		answer, err := stream.RTCAnswerViewer(c.Param("id"), c.Param("viewer"), desc)
+		answer, err := stream.RTCAnswerViewer(c.Param("id"), c.Param("viewer"), desc, stream.ClientLoopback(c.ClientIP()))
 		if err != nil {
 			writeRTCErr(c, err)
 			return
@@ -337,7 +348,7 @@ func registerStream(r *gin.Engine) {
 		if !ok {
 			return
 		}
-		answer, err := stream.RTCAnswer(c.Param("id"), desc)
+		answer, err := stream.RTCAnswer(c.Param("id"), desc, stream.ClientLoopback(c.ClientIP()))
 		if err != nil {
 			writeRTCErr(c, err)
 			return

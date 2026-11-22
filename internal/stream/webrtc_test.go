@@ -18,11 +18,15 @@ func TestGSTRTPCmd(t *testing.T) {
 	if strings.Contains(s, "x264enc") || strings.Contains(s, "hlssink") {
 		t.Fatalf("rtp fallback must stay copy RTP only: %s", s)
 	}
+	dual := strings.Join(gstRTPCmd("in", 11111, 22222).Args, " ")
+	if !strings.Contains(dual, "tee") || !strings.Contains(dual, "openh264enc") || !strings.Contains(dual, "port=22222") {
+		t.Fatalf("dual ingest must baseline-encode WebRTC branch: %s", dual)
+	}
 }
 
 func TestRTCAnswerUnknown(t *testing.T) {
 	off := webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: "v=0"}
-	if _, err := RTCAnswer("dddddddddddddddd", off); err == nil || err.Error() != "unknown stream" {
+	if _, err := RTCAnswer("dddddddddddddddd", off, false); err == nil || err.Error() != "unknown stream" {
 		t.Fatalf("want unknown stream, got %v", err)
 	}
 }
@@ -75,10 +79,10 @@ func TestOpenViewerUniqueAddress(t *testing.T) {
 		t.Fatalf("slot: %+v", a)
 	}
 	off := webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: "v=0"}
-	if _, err := RTCAnswerViewer(id, "eeeeeeeeeeeeeeee", off); err == nil || err.Error() != "unknown viewer" {
+	if _, err := RTCAnswerViewer(id, "eeeeeeeeeeeeeeee", off, false); err == nil || err.Error() != "unknown viewer" {
 		t.Fatalf("want unknown viewer, got %v", err)
 	}
-	if _, err := RTCAnswerViewer(id, a.ID, off); err == nil {
+	if _, err := RTCAnswerViewer(id, a.ID, off, false); err == nil {
 		t.Fatal("bad sdp must not consume the viewer")
 	}
 	mu.Lock()

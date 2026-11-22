@@ -70,7 +70,7 @@ export function LiveView({
       const viewers = await fetch(`${origin}/webrtc/${id}/viewers`, { method: "POST" });
       if (!viewers.ok || closed) return;
       const slot = (await viewers.json()) as Slot;
-      pc = new RTCPeerConnection({ iceServers: [] });
+      pc = new RTCPeerConnection({ iceServers: loopbackIce() });
       pc.createDataChannel(slot.channel, { negotiated: true, id: slot.dc_id });
       pc.ontrack = (event) => {
         const receiver = event.receiver as RTCRtpReceiver & { playoutDelayHint?: number };
@@ -78,21 +78,22 @@ export function LiveView({
           receiver.jitterBufferTarget = 200;
           receiver.playoutDelayHint = 0.2;
         } catch {
-          return;
+          void receiver;
         }
         video.srcObject = event.streams[0] ?? new MediaStream([event.track]);
         arm();
       };
       pc.addTransceiver("video", { direction: "recvonly" });
-      preferMainH264(pc);
+      if (!firefoxUA()) preferMainH264(pc);
       await pc.setLocalDescription(await pc.createOffer());
-      await waitForHost(pc);
+      await waitForICE(pc);
       if (closed || !pc.localDescription) return;
       const offerURL = slot.offer.startsWith("http") ? slot.offer : `${origin}${slot.offer}`;
+      const sdp = scrubOfferSdp(pc.localDescription.sdp);
       const answer = await fetch(offerURL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
+        body: JSON.stringify({ sdp, type: pc.localDescription.type }),
       });
       if (!answer.ok || closed) return;
       await pc.setRemoteDescription(await answer.json());
@@ -151,6 +152,51 @@ function waitForHost(pc: RTCPeerConnection) {
       };
       pc.addEventListener("icecandidate", hit);
     }),
-    new Promise<void>((resolve) => window.setTimeout(resolve, 800)),
+    new Promise<void>((resolve) => window.setTimeout(resolve, isLoopbackOrigin() ? 2500 : 800)),
   ]);
+}
+
+function firefoxUA() {
+  return /Firefox\//i.test(navigator.userAgent);
+}
+
+function isLoopbackOrigin() {
+  const host = new URL(window.location.href).hostname;
+  return host === "127.0.0.1" || host === "localhost" || host === "[::1]";
+}
+
+function loopbackIce(): RTCIceServer[] {
+  return isLoopbackOrigin() ? [{ urls: "stun:stun.services.mozilla.com:3478" }] : [];
+}
+
+function waitForICE(pc: RTCPeerConnection) {
+  if (firefoxUA() && isLoopbackOrigin()) {
+    return new Promise<void>((resolve) => {
+      if (pc.iceGatheringState === "complete") return resolve();
+      const done = () => {
+        if (pc.iceGatheringState === "complete") {
+          pc.removeEventListener("icegatheringstatechange", done);
+          resolve();
+        }
+      };
+      pc.addEventListener("icegatheringstatechange", done);
+      window.setTimeout(resolve, 5000);
+    });
+  }
+  return waitForHost(pc);
+}
+
+function scrubOfferSdp(sdp: string) {
+  const fixed = sdp.replaceAll("packetization-mode=0", "packetization-mode=1");
+  const keepMdns = firefoxUA() && isLoopbackOrigin();
+  return fixed
+    .split(/\r?\n/)
+    .filter((line) => {
+      if (!line.startsWith("a=candidate:")) return true;
+      if (!keepMdns && line.includes(".local")) return false;
+      if (/\s169\.254\./.test(line)) return false;
+      if (/\s172\.(1[6-9]|2\d|3[01])\./.test(line)) return false;
+      return true;
+    })
+  .join("\r\n");
 }

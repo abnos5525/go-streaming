@@ -12,6 +12,8 @@ import (
 
 	"github.com/pion/webrtc/v4"
 
+	"github.com/abnos5525/go-streaming/internal/protocols/rtp"
+
 	rtc "github.com/abnos5525/go-streaming/internal/protocols/webrtc"
 )
 
@@ -27,10 +29,38 @@ func (s *session) refreshRTCCodecLocked() {
 }
 
 func (s *session) h264Cap() webrtc.RTPCodecCapability {
-	return rtc.CapFrom(s.spsNAL, s.ppsNAL)
+	sps, pps := s.rtcCodecParams()
+	return rtc.CapFrom(sps, pps)
+}
+
+func (s *session) rtcCodecParams() (sps, pps []byte) {
+	if len(s.rtcSpsNAL) > 0 && len(s.rtcPpsNAL) > 0 {
+		return s.rtcSpsNAL, s.rtcPpsNAL
+	}
+	return s.spsNAL, s.ppsNAL
+}
+
+func (s *session) rtcCapReady() bool {
+	sps, pps := s.rtcCodecParams()
+	if len(sps) == 0 || len(pps) == 0 {
+		return false
+	}
+	// gst shareRemux: WebRTC RTP is on the openh264 tap — never answer with Main from the LL tap.
+	if s.proc != nil && s.mc == nil {
+		return len(s.rtcSpsNAL) > 0 && len(s.rtcPpsNAL) > 0
+	}
+	return true
 }
 
 // bindRTCPort binds the localhost RTP sink, trying backups on collision.
+func ClientLoopback(remote string) bool {
+	host := remote
+	if h, _, err := net.SplitHostPort(remote); err == nil {
+		host = h
+	}
+	return host == "127.0.0.1" || host == "::1"
+}
+
 func bindRTCPort(id string) (net.PacketConn, int, error) {
 	base := rtc.WebrtcPort(id)
 	for _, port := range []int{base, base + 1, base + 2} {
@@ -59,7 +89,7 @@ func waitRTC(id string, d time.Duration) (*session, *rtc.Hub, webrtc.RTPCodecCap
 		}
 		// Live answers need SPS+PPS *and* a cached IDR. Cold-start offers that
 		// beat the first keyframe ICE-connect then stay black until refresh.
-		ready := s.rtcHub != nil && s.rtcHub.HasIDR()
+		ready := s.rtcHub != nil && s.rtcHub.HasIDR() && s.rtcCapReady()
 		// d==0: unit test — hub may exist before SPS so /offer is not 404.
 		if ready || (d == 0 && s.rtcHub != nil) {
 			hub, cap, gen := s.rtcHub, s.h264Cap(), s.gen
@@ -180,11 +210,11 @@ func SendViewer(streamID, viewerID, text string) error {
 	return dc.SendText(text)
 }
 
-func RTCAnswer(id string, offer webrtc.SessionDescription) (webrtc.SessionDescription, error) {
-	return answerRTC(id, "", "overlay", 1, offer)
+func RTCAnswer(id string, offer webrtc.SessionDescription, fromLoopback bool) (webrtc.SessionDescription, error) {
+	return answerRTC(id, "", "overlay", 1, offer, fromLoopback)
 }
 
-func RTCAnswerViewer(streamID, viewerID string, offer webrtc.SessionDescription) (webrtc.SessionDescription, error) {
+func RTCAnswerViewer(streamID, viewerID string, offer webrtc.SessionDescription, fromLoopback bool) (webrtc.SessionDescription, error) {
 	if !ValidID(viewerID) {
 		return webrtc.SessionDescription{}, fmt.Errorf("unknown viewer")
 	}
@@ -202,7 +232,7 @@ func RTCAnswerViewer(streamID, viewerID string, offer webrtc.SessionDescription)
 	if label == "" {
 		return webrtc.SessionDescription{}, fmt.Errorf("unknown viewer")
 	}
-	ans, err := answerRTC(streamID, viewerID, label, dcID, offer)
+	ans, err := answerRTC(streamID, viewerID, label, dcID, offer, fromLoopback)
 	if err != nil {
 		mu.Lock()
 		if s != nil {
@@ -215,14 +245,14 @@ func RTCAnswerViewer(streamID, viewerID string, offer webrtc.SessionDescription)
 	return ans, err
 }
 
-func answerRTC(id, viewerID, label string, dcID uint16, offer webrtc.SessionDescription) (webrtc.SessionDescription, error) {
+func answerRTC(id, viewerID, label string, dcID uint16, offer webrtc.SessionDescription, fromLoopback bool) (webrtc.SessionDescription, error) {
 	s, hub, cap, my, err := waitRTC(id, 12*time.Second)
 	if err != nil {
 		return webrtc.SessionDescription{}, err
 	}
 	offer.SDP = rtc.RewriteProfile(offer.SDP, cap.SDPFmtpLine)
 
-	pc, err := rtc.NewPeerConnection(cap)
+	pc, err := rtc.NewPeerConnectionForOffer(cap, offer.SDP, fromLoopback)
 	if err != nil {
 		return webrtc.SessionDescription{}, err
 	}
@@ -261,6 +291,7 @@ func answerRTC(id, viewerID, label string, dcID uint16, offer webrtc.SessionDesc
 		return webrtc.SessionDescription{}, err
 	}
 	ovdc.OnOpen(func() { go pushOverlay(id, ovdc, stop) })
+	offer.SDP = rtc.PrepareOfferSDP(offer.SDP, fromLoopback)
 	if err := pc.SetRemoteDescription(offer); err != nil {
 		return webrtc.SessionDescription{}, err
 	}
@@ -393,8 +424,9 @@ func (s *session) stopRTCLocked() {
 
 // pumpRTP relays a GStreamer RTP remux into the shared pion track (RTSP
 // fallback only). A dead ingest kills that remux so rtcRemux restarts it.
-func (s *session) pumpRTP(my int, conn net.PacketConn, hub *rtc.Hub) {
+func (s *session) pumpRTP(my int, conn net.PacketConn, _ *rtc.Hub) {
 	buf := make([]byte, 8192)
+	var fu []byte
 	for {
 		if !s.alive(my) {
 			return
@@ -406,6 +438,16 @@ func (s *session) pumpRTP(my int, conn net.PacketConn, hub *rtc.Hub) {
 				continue
 			}
 			return
+		}
+		pt, _, payload, _, ok := rtp.Parse(buf[:n])
+		if ok && pt == 96 {
+			s.learnRTCVideoParams(rtp.Unpack(payload, &fu))
+		}
+		mu.Lock()
+		hub := s.rtcHub
+		mu.Unlock()
+		if hub == nil {
+			continue
 		}
 		hub.Feed(buf[:n])
 	}
