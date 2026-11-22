@@ -2,7 +2,7 @@
 
 Low-latency live video server in Go. Ingest camera multicast (UDP/RTP) or RTSP, then play in the browser as **Apple LL-HLS** or **WebRTC**. Optional AI bounding boxes are drawn on a canvas overlay (not burned into the video).
 
-No authentication. All stream routes are public.
+No lock on stream routes. `GET /` checks an HS256 JWT only when `AUTH_SECRET` is set.
 
 | | |
 |---|---|
@@ -148,6 +148,22 @@ Copy `.env.example` → `.env` only if you need overrides. The process runs with
 | `HLS_TIME` | LL-HLS target segment duration seconds (`0.25`–`6`) |
 | `HLS_LIST_SIZE` | Playlist window (`7`–`15`) |
 | `AI_OFFSET_MS` | Overlay timestamp offset |
+
+### JWT on `GET /`
+
+Leave `AUTH_SECRET` unset and `GET /` stays open (`{"message":"ok"}`).
+
+To turn the check on:
+
+```bash
+set AUTH_SECRET=dev-secret
+go run ./cmd/token
+go run .
+```
+
+`cmd/token` prints a token valid for one hour. In the docs scenario page, paste it and press **GET /**. Without the header the same call returns `401`. `POST /stream/start` does not use this token.
+
+On PowerShell, set the variable in the same window before both commands. On bash, use `export AUTH_SECRET=dev-secret`.
 
 ---
 

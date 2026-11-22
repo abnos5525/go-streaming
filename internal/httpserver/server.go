@@ -19,7 +19,7 @@ func cors() gin.HandlerFunc {
 		h := c.Writer.Header()
 		h.Set("Access-Control-Allow-Origin", "*")
 		h.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		h.Set("Access-Control-Allow-Headers", "Content-Type")
+		h.Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
 			return

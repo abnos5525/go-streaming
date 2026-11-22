@@ -27,6 +27,8 @@ export function Scenario() {
   const [outputType, setOutputType] = useState<6 | 7>(6);
   const [mediaURL, setMediaURL] = useState("");
   const [error, setError] = useState("");
+  const [token, setToken] = useState("");
+  const [gate, setGate] = useState("");
   const [busy, setBusy] = useState(false);
 
   const origin = api.replace(/\/$/, "");
@@ -67,6 +69,22 @@ export function Scenario() {
       setMediaURL("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "stop failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function whoami() {
+    setBusy(true);
+    setGate("");
+    const headers = new Headers();
+    if (token.trim()) headers.set("Authorization", `Bearer ${token.trim()}`);
+    try {
+      const res = await fetch(`${origin}/`, { headers });
+      const body = (await res.json().catch(() => null)) as { message?: string } | null;
+      setGate(`${res.status} ${body?.message ?? ""}`.trim());
+    } catch (err) {
+      setGate(err instanceof Error ? err.message : "GET / failed");
     } finally {
       setBusy(false);
     }
@@ -124,6 +142,21 @@ export function Scenario() {
             ) : null}
           </div>
         ) : null}
+        <label>
+          توکن JWT
+          <input
+            value={token}
+            onChange={(event) => setToken(event.target.value)}
+            spellCheck={false}
+            placeholder="خالی = درخواست بدون Authorization"
+          />
+        </label>
+        <div className="row">
+          <Button type="button" disabled={busy} onClick={() => void whoami()}>
+            GET /
+          </Button>
+        </div>
+        {gate ? <p className="prose">{gate}</p> : null}
       </form>
     </section>
   );
