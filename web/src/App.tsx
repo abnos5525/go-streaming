@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Glossary } from "@/GlossaryDialog";
 
 type BootStep = { step: string; name: string; detail: string };
 
@@ -11,6 +12,7 @@ const boot: BootStep[] = [
 
 export default function App() {
   const [inside, setInside] = useState(false);
+  const [gloss, setGloss] = useState(false);
 
   return (
     <>
@@ -25,14 +27,14 @@ export default function App() {
         </div>
         {inside ? (
           <Button type="button" onClick={() => setInside(false)}>
-            برگشت به نقشه
+            ↩ برگشت به نقشه
           </Button>
         ) : null}
       </header>
       <main>
         <section id="world" className={inside ? "scene" : "scene on"} aria-label="نقشه کلی">
           <div className="hero">
-            <p className="hero-kicker">جریان واقعی محصول</p>
+            <p className="hero-kicker">جریان واقعی محصول شما</p>
             <div className="flow-row">
               <article className="card">
                 <h2>Record Server</h2>
@@ -56,7 +58,7 @@ export default function App() {
                 }}
               >
                 <h2>go-streaming</h2>
-                <span>Go · Gin · :8085</span>
+                <span>Go · این پروژه</span>
                 <span className="cta">برای ورود به داخل، کلیک کن</span>
               </article>
               <div className="conn cyan" aria-hidden="true">
@@ -78,8 +80,18 @@ export default function App() {
                 خط آبی = خروجی به مرورگر
               </li>
             </ul>
+            <div className="hero-actions">
+              <Button
+                type="button"
+                className="btn gloss-open"
+                title="واژه‌نامه + انیمیشن فلو"
+                onClick={() => setGloss(true)}
+              >
+                کلمات کلیدی
+              </Button>
+            </div>
             <p className="world-hint">
-              الان فقط نقشهٔ بیرون را می‌بینی. برای دیدن بوت سرور روی <b>go-streaming</b> کلیک کن.
+              الان فقط نقشهٔ بیرون را می‌بینی. برای دیدن فایل‌ها و متدها روی <b>go-streaming</b> کلیک کن. واژه‌ها را از دکمهٔ بالا مرور کن.
             </p>
           </div>
         </section>
@@ -97,6 +109,7 @@ export default function App() {
           </div>
         </section>
       </main>
+      {gloss ? <Glossary onClose={() => setGloss(false)} /> : null}
     </>
   );
 }
