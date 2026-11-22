@@ -5,8 +5,8 @@ import { LiveView } from "@/LiveView";
 type StartBody = { url: string; output_type: number };
 
 const defaultAPI = "http://127.0.0.1:8085";
-const demoCamera = "rtsp://9627b0bf2a7b.entrypoint.cloud.wowza.com:1935/app-p5260J38/66abe4b9_stream1";
-const localCamera = "udp://127.0.0.1:5600";
+const demoCamera = "udp://127.0.0.1:5600";
+const wowzaCamera = "rtsp://9627b0bf2a7b.entrypoint.cloud.wowza.com:1935/app-p5260J38/66abe4b9_stream1";
 
 function streamId(mediaURL: string) {
   return mediaURL.match(/\/(?:hls|webrtc)\/([0-9a-f]{16})\//i)?.[1] ?? "";
@@ -139,13 +139,13 @@ export function Scenario() {
           آدرس منبع
           <input value={source} onChange={(event) => setSource(event.target.value)} spellCheck={false} />
         </label>
-        <p className="world-hint">آدرس پیش‌فرض دوربین آزمایشی عمومی Wowza است. از این شبکه پاسخ ۴۰۳ می‌دهد. دکمهٔ تصویر محلی توپ متحرک را می‌گذارد که همین صفحه پخش می‌کند.</p>
+        <p className="world-hint">آدرس پیش‌فرض تصویر محلی است و Start همین را پخش می‌کند. دوربین Wowza از این شبکه ۴۰۳ می‌دهد و تصویر ندارد.</p>
         <div className="row">
           <Button type="button" disabled={busy} onClick={() => setSource(demoCamera)}>
-            دوربین Wowza
-          </Button>
-          <Button type="button" disabled={busy} onClick={() => setSource(localCamera)}>
             تصویر محلی
+          </Button>
+          <Button type="button" disabled={busy} onClick={() => setSource(wowzaCamera)}>
+            دوربین Wowza
           </Button>
         </div>
         <label>

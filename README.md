@@ -179,13 +179,7 @@ grpcurl -plaintext 127.0.0.1:9095 stream.v1.Control/Status
 
 ### Demo camera
 
-`GET /demo` and the scenario source field use the official Wowza test camera:
-
-```text
-rtsp://9627b0bf2a7b.entrypoint.cloud.wowza.com:1935/app-p5260J38/66abe4b9_stream1
-```
-
-From this network that host answers RTSP SETUP with 403, so Start does not show a picture. The scenario button «تصویر محلی» switches the field to `udp://127.0.0.1:5600`. Publish that picture with GStreamer before pressing Start:
+`GET /demo` and the scenario source field use the local H264 test picture on `udp://127.0.0.1:5600`. The official Wowza RTSP URL returns 403 from this network, so it is only a second button and does not play. Publish the local picture with GStreamer before pressing Start:
 
 ```powershell
 gst-launch-1.0 videotestsrc is-live=true pattern=ball ! video/x-raw,width=640,height=360,framerate=25/1 ! x264enc tune=zerolatency bitrate=800 speed-preset=ultrafast key-int-max=25 ! rtph264pay pt=96 config-interval=1 ! udpsink host=127.0.0.1 port=5600

@@ -7,7 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const demoCamera = "rtsp://9627b0bf2a7b.entrypoint.cloud.wowza.com:1935/app-p5260J38/66abe4b9_stream1"
+const demoCamera = "udp://127.0.0.1:5600"
 
 func registerDemo(r *gin.Engine) {
 	r.GET("/demo", serveDemo)
@@ -19,7 +19,7 @@ func serveDemo(c *gin.Context) {
 		url = demoCamera
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"name":        "wowza test camera",
+		"name":        "local test camera",
 		"url":         url,
 		"output_type": 6,
 	})
