@@ -12,4 +12,5 @@ func Register(r *gin.Engine) {
 		c.JSON(http.StatusOK, gin.H{"message": "ok"})
 	})
 	registerStream(r)
+	registerDemo(r)
 }

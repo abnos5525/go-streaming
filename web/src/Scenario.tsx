@@ -1,10 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 
 type StartBody = { url: string; output_type: number };
 
 const defaultAPI = "http://127.0.0.1:8085";
-const defaultSource = "udp://224.2.0.1:5484";
+const demoCamera = "rtsp://9627b0bf2a7b.entrypoint.cloud.wowza.com:1935/app-p5260J38/66abe4b9_stream1";
 
 function streamId(mediaURL: string) {
   return mediaURL.match(/\/(?:hls|webrtc)\/([0-9a-f]{16})\//i)?.[1] ?? "";
@@ -23,7 +23,7 @@ async function apiError(res: Response) {
 
 export function Scenario() {
   const [api, setApi] = useState(defaultAPI);
-  const [source, setSource] = useState(defaultSource);
+  const [source, setSource] = useState(demoCamera);
   const [outputType, setOutputType] = useState<6 | 7>(6);
   const [mediaURL, setMediaURL] = useState("");
   const [error, setError] = useState("");
@@ -33,6 +33,17 @@ export function Scenario() {
 
   const origin = api.replace(/\/$/, "");
   const player = mediaURL ? playURL(mediaURL) : "";
+
+  useEffect(() => {
+    const ac = new AbortController();
+    fetch(`${origin}/demo`, { signal: ac.signal })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { url?: string } | null) => {
+        if (data?.url) setSource(data.url);
+      })
+      .catch(() => {});
+    return () => ac.abort();
+  }, [origin]);
 
   async function start() {
     setBusy(true);
@@ -110,6 +121,7 @@ export function Scenario() {
           آدرس منبع
           <input value={source} onChange={(event) => setSource(event.target.value)} spellCheck={false} />
         </label>
+        <p className="world-hint">دوربین پیش‌فرض یک استریم عمومی H264 است. پخش RTSP روی این سرور به GStreamer نیاز دارد.</p>
         <label>
           نوع خروجی
           <select

@@ -163,7 +163,23 @@ go run .
 
 `cmd/token` prints a token valid for one hour. In the docs scenario page, paste it and press **GET /**. Without the header the same call returns `401`. `POST /stream/start` does not use this token.
 
-On PowerShell, set the variable in the same window before both commands. On bash, use `export AUTH_SECRET=dev-secret`.
+On PowerShell, set the variable in the same window before both commands, or rely on `.env` (`AUTH_SECRET` is already set in the local `.env`). On bash, `export` is the same idea.
+
+### gRPC control
+
+`.env` sets `GRPC_ADDR=127.0.0.1:9095`. The process listens there with server reflection.
+
+```bash
+grpcurl -plaintext 127.0.0.1:9095 list
+grpcurl -plaintext -d "{\"url\":\"rtsp://9627b0bf2a7b.entrypoint.cloud.wowza.com:1935/app-p5260J38/66abe4b9_stream1\",\"output_type\":6}" 127.0.0.1:9095 stream.v1.Control/Start
+grpcurl -plaintext 127.0.0.1:9095 stream.v1.Control/Status
+```
+
+`output_type` is `6` (LL-HLS) or `7` (WebRTC). Stop uses the same source URL.
+
+### Demo camera
+
+`GET /demo` returns the camera in `DEMO_CAMERA_URL`. The docs scenario fills that URL on load. It is Wowza's public H264 RTSP test loop, not a private camera. RTSP ingest needs `gst-launch-1.0` on PATH. If that host is down, replace `DEMO_CAMERA_URL` in `.env`.
 
 ---
 

@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package stream.v1;
+
+option go_package = "github.com/abnos5525/go-streaming/internal/grpcstream/pb;pb";
+
+service Control {
+  rpc Start(StartRequest) returns (StartResponse);
+  rpc Stop(StopRequest) returns (StopResponse);
+  rpc Status(StatusRequest) returns (StatusResponse);
+}
+
+message StartRequest {
+  string url = 1;
+  int32 output_type = 2;
+}
+
+message StartResponse {
+  string id = 1;
+  string url = 2;
+  int32 output_type = 3;
+}
+
+message StopRequest {
+  string url = 1;
+}
+
+message StopResponse {
+  string message = 1;
+}
+
+message StatusRequest {}
+
+message Session {
+  string id = 1;
+  string url = 2;
+  bool ready = 3;
+}
+
+message StatusResponse {
+  repeated Session sessions = 1;
+}
