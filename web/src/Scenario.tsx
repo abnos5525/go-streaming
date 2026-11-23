@@ -98,7 +98,7 @@ export function Scenario() {
       const res = await fetch(`${origin}/stream/stop`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: source.trim() }),
+        body: JSON.stringify({ url: source.trim(), output_type: outputType }),
       });
       if (!res.ok) throw new Error(await apiError(res));
       setMediaURL("");

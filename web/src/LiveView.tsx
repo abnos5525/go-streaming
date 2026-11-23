@@ -74,9 +74,12 @@ export function LiveView({
       pc.createDataChannel(slot.channel, { negotiated: true, id: slot.dc_id });
       pc.ontrack = (event) => {
         const receiver = event.receiver as RTCRtpReceiver & { playoutDelayHint?: number };
+        const ff = firefoxUA();
+        const jt = ff ? 120 : 200;
+        const pd = ff ? 0.12 : 0.2;
         try {
-          receiver.jitterBufferTarget = 200;
-          receiver.playoutDelayHint = 0.2;
+          receiver.jitterBufferTarget = jt;
+          receiver.playoutDelayHint = pd;
         } catch {
           void receiver;
         }
@@ -84,7 +87,8 @@ export function LiveView({
         arm();
       };
       pc.addTransceiver("video", { direction: "recvonly" });
-      if (!firefoxUA()) preferMainH264(pc);
+      if (firefoxUA()) preferBaselineH264(pc);
+      else preferMainH264(pc);
       await pc.setLocalDescription(await pc.createOffer());
       await waitForICE(pc);
       if (closed || !pc.localDescription) return;
@@ -106,6 +110,27 @@ export function LiveView({
   }, [id, mediaURL, origin, outputType]);
 
   return <video ref={videoRef} className="live" autoPlay playsInline muted controls />;
+}
+
+function preferBaselineH264(pc: RTCPeerConnection) {
+  const transceiver = pc.getTransceivers()[0];
+  const caps = RTCRtpReceiver.getCapabilities("video");
+  if (!transceiver?.setCodecPreferences || !caps) return;
+  const h264 = caps.codecs.filter(
+    (codec) => /H264/i.test(codec.mimeType) && /packetization-mode=1/.test(codec.sdpFmtpLine || ""),
+  );
+  const pref: RTCRtpCodec[] = [];
+  const add = (codecs: RTCRtpCodec[]) => {
+    for (const codec of codecs) if (!pref.includes(codec)) pref.push(codec);
+  };
+  add(h264.filter((codec) => /profile-level-id=42/i.test(codec.sdpFmtpLine || "")));
+  add(h264);
+  add(caps.codecs);
+  try {
+    transceiver.setCodecPreferences(pref);
+  } catch {
+    return;
+  }
 }
 
 function preferMainH264(pc: RTCPeerConnection) {

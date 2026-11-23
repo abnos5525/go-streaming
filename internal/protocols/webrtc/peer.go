@@ -43,6 +43,17 @@ func PrepareOfferSDP(sdp string, loopback bool) string {
 	sdp = strings.ReplaceAll(sdp, "packetization-mode=0", "packetization-mode=1")
 	if loopback {
 		sdp = mdnsCandidate.ReplaceAllString(sdp, `${1}127.0.0.1${3}`)
+		sdp = loopbackHostCandidate.ReplaceAllStringFunc(sdp, func(line string) string {
+			m := loopbackHostCandidate.FindStringSubmatch(line)
+			if len(m) != 4 {
+				return line
+			}
+			ip := net.ParseIP(m[2])
+			if ip != nil && ip.IsLoopback() {
+				return line
+			}
+			return m[1] + "127.0.0.1" + m[3]
+		})
 		return filterOfferCandidates(sdp)
 	}
 	return ResolveMDNS(filterOfferCandidates(sdp))
@@ -148,6 +159,7 @@ func newPeerConnection(cap pion.RTPCodecCapability, firefoxMDNS, loopback bool) 
 }
 
 var mdnsCandidate = regexp.MustCompile(`(a=candidate:\S+ \d+ \S+ \d+ )([A-Za-z0-9-]+\.local)( \d+)`)
+var loopbackHostCandidate = regexp.MustCompile(`(?m)^(a=candidate:\S+ \d+ \S+ \d+ )(\S+)( \d+ typ host)`)
 
 func lookupV4(ctx context.Context, host string) string {
 	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)

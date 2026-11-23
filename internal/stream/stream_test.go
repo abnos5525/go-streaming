@@ -291,15 +291,20 @@ func TestLowLatencyDefaults(t *testing.T) {
 }
 
 func TestMetaOutputType(t *testing.T) {
-	s := &session{id: "ffffffffffffffff", out: 7, running: true, rtcHub: &rtc.Hub{}}
+	s := &session{id: "ffffffffffffffff", out: 7, running: true, wantRTC: true, rtcHub: &rtc.Hub{}}
 	m := s.metaLag(0)
-	if m.OutputType != 7 || !m.Ready || m.URL != "/webrtc/ffffffffffffffff/offer" {
-		t.Fatalf("webrtc meta: %+v", m)
+	if m.OutputType != 7 || m.Ready || m.URL != "/webrtc/ffffffffffffffff/offer" {
+		t.Fatalf("webrtc meta until IDR: %+v", m)
 	}
-	h := &session{id: "ffffffffffffffff", out: 6, running: true}
+	h := &session{id: "ffffffffffffffff", out: 6, running: true, wantLL: true}
+	if err := h.startLLLocked(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { h.stopLLLocked() })
+	h.llReady.Store(true)
 	m = h.metaLag(0)
-	if m.Ready || m.URL != "/hls/ffffffffffffffff/index.m3u8" {
-		t.Fatalf("hls meta until first IDR: %+v", m)
+	if !m.Ready || m.URL != "/hls/ffffffffffffffff/index.m3u8" || !m.HlsReady {
+		t.Fatalf("hls meta: %+v", m)
 	}
 }
 
@@ -356,6 +361,37 @@ func TestFanoutAfterDetachLL(t *testing.T) {
 	pkt := make([]byte, 14)
 	pkt[0], pkt[1], pkt[12] = 0x80, 96, 0x61
 	s.fanout(pkt, nil) // must not panic on closed/nil llCh
+}
+
+func TestStopLaneKeepsOtherLane(t *testing.T) {
+	u := "udp://224.2.0.1:59998"
+	s := &session{url: u, id: idFor(u), running: true, out: 7, wantLL: true, llRef: 1, wantRTC: true, rtcRef: 1}
+	if err := s.startLLLocked(); err != nil {
+		t.Fatal(err)
+	}
+	hub, err := rtc.NewHub(s.h264Cap())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.rtcHub = hub
+	mu.Lock()
+	sessions[u] = s
+	mu.Unlock()
+	t.Cleanup(func() {
+		mu.Lock()
+		delete(sessions, u)
+		s.stopLLLocked()
+		s.stopRTCLocked()
+		mu.Unlock()
+	})
+	if err := StopLane(u, 6); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !s.running || !s.wantRTC || s.wantLL || s.ll != nil || s.rtcHub == nil {
+		t.Fatalf("WebRTC must survive HLS stop: running=%v wantRTC=%v wantLL=%v", s.running, s.wantRTC, s.wantLL)
+	}
 }
 
 func TestStartKeepsBothLanes(t *testing.T) {

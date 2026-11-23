@@ -67,7 +67,10 @@ type session struct {
 	buf                  []*ai.AIFrame
 	arr                  []int64 // server arrival ms per buf entry (same order)
 	out                  int     // 6 = LL-HLS, 7 = WebRTC; latest start is /play only
+	wantLL               bool
 	wantRTC              bool
+	llRef                int // Start/Stop per lane; ingest stays while either ref > 0
+	rtcRef               int
 	ll                   *hls.Hub
 	llReady              atomic.Bool
 	llNeedIDR            atomic.Bool // set on llCh drop; skip WriteH264 until next IDR
@@ -94,19 +97,23 @@ type Track struct {
 }
 
 type Meta struct {
-	ID         string      `json:"id"`
-	URL        string      `json:"url"`
-	RTSP       string      `json:"rtsp"`
-	Started    bool        `json:"started"`
-	Ready      bool        `json:"ready"`
-	Error      string      `json:"error,omitempty"`
-	Tracks     []Track     `json:"tracks,omitempty"`
-	RTP        uint32      `json:"rtp,omitempty"`
-	AI         *ai.AIFrame `json:"ai,omitempty"`
-	SEI        []h264.SEI  `json:"sei,omitempty"`
-	AIAgeMS    int64       `json:"ai_age_ms,omitempty"`
-	AIFPS      float64     `json:"ai_fps,omitempty"`
-	OutputType int         `json:"output_type,omitempty"`
+	ID          string      `json:"id"`
+	URL         string      `json:"url"`
+	RTSP        string      `json:"rtsp"`
+	Started     bool        `json:"started"`
+	Ready       bool        `json:"ready"`
+	Error       string      `json:"error,omitempty"`
+	Tracks      []Track     `json:"tracks,omitempty"`
+	RTP         uint32      `json:"rtp,omitempty"`
+	AI          *ai.AIFrame `json:"ai,omitempty"`
+	SEI         []h264.SEI  `json:"sei,omitempty"`
+	AIAgeMS     int64       `json:"ai_age_ms,omitempty"`
+	AIFPS       float64     `json:"ai_fps,omitempty"`
+	OutputType  int         `json:"output_type,omitempty"`
+	HlsReady    bool        `json:"hls_ready,omitempty"`
+	WebRTCReady bool        `json:"webrtc_ready,omitempty"`
+	WantLL      bool        `json:"want_ll,omitempty"`
+	WantRTC     bool        `json:"want_rtc,omitempty"`
 }
 
 var (
@@ -147,11 +154,19 @@ func (s *session) outURL() string {
 	return s.playlist()
 }
 
+func (s *session) hlsReady() bool {
+	return s.wantLL && s.ll != nil && s.llReady.Load()
+}
+
+func (s *session) webrtcReady() bool {
+	return s.wantRTC && s.rtcHub != nil && s.rtcHub.HasIDR()
+}
+
 func (s *session) laneReady() bool {
 	if s.out == 7 {
-		return s.running && s.rtcHub != nil
+		return s.running && s.webrtcReady()
 	}
-	return s.llReady.Load()
+	return s.running && s.hlsReady()
 }
 
 func (s *session) meta() Meta { return s.metaLag(-1) }
@@ -187,7 +202,12 @@ func (s *session) metaLag(want int64) Meta {
 			age = 0
 		}
 	}
-	return Meta{ID: s.id, URL: s.outURL(), RTSP: s.url, Started: s.running, Ready: s.laneReady(), Error: s.last, Tracks: s.tracks, RTP: s.rtpTS.Load(), AI: s.delayedAI(lag), SEI: s.sei, AIAgeMS: age, AIFPS: fpsOf(s.arr), OutputType: s.out}
+	return Meta{
+		ID: s.id, URL: s.outURL(), RTSP: s.url, Started: s.running, Ready: s.laneReady(),
+		Error: s.last, Tracks: s.tracks, RTP: s.rtpTS.Load(), AI: s.delayedAI(lag), SEI: s.sei,
+		AIAgeMS: age, AIFPS: fpsOf(s.arr), OutputType: s.out,
+		HlsReady: s.hlsReady(), WebRTCReady: s.webrtcReady(), WantLL: s.wantLL, WantRTC: s.wantRTC,
+	}
 }
 
 func sessByID(id string) *session {
@@ -243,7 +263,9 @@ func Start(url string, outputType int) (Meta, error) {
 	if s, ok := sessions[url]; ok && s.running {
 		hadRTC := s.wantRTC || s.rtcHub != nil
 		hadLL := s.ll != nil
+		s.bumpLaneRef(outputType)
 		if err := s.setLaneLocked(outputType); err != nil {
+			s.unbumpLaneRef(outputType)
 			mu.Unlock()
 			logStream("FAIL", s.id, url, "lane %s: %v", laneLabel(outputType), err)
 			return Meta{}, err
@@ -260,7 +282,9 @@ func Start(url string, outputType int) (Meta, error) {
 	}
 	s := &session{url: url, id: idFor(url), running: true, gen: 1, out: outputType}
 	s.delayMS.Store(aiDelayMS())
+	s.bumpLaneRef(outputType)
 	if err := s.setLaneLocked(outputType); err != nil {
+		s.unbumpLaneRef(outputType)
 		mu.Unlock()
 		logStream("FAIL", s.id, url, "lane %s: %v", laneLabel(outputType), err)
 		return Meta{}, err
@@ -279,7 +303,12 @@ func Start(url string, outputType int) (Meta, error) {
 	return s.meta(), nil
 }
 
+// Stop tears the whole session down. Prefer StopLane so one viewer does not kill the other lane.
 func Stop(url string) error {
+	return StopLane(url, 0)
+}
+
+func StopLane(url string, outputType int) error {
 	url, err := resolve(url)
 	if err != nil {
 		logStream("FAIL", "-", url, "stop rejected: %v", err)
@@ -290,6 +319,35 @@ func Stop(url string) error {
 	if !ok || !s.running {
 		mu.Unlock()
 		logStream("FAIL", "-", url, "stop: stream not running")
+		return fmt.Errorf("stream not running")
+	}
+	if outputType == 0 {
+		id := s.id
+		mu.Unlock()
+		return stopAllLocked(url, id)
+	}
+	if outputType != 6 && outputType != 7 {
+		mu.Unlock()
+		return fmt.Errorf("output_type must be 6 or 7")
+	}
+	s.releaseLaneRef(outputType)
+	keep := s.running && (s.llRef > 0 || s.rtcRef > 0)
+	if keep {
+		id := s.id
+		mu.Unlock()
+		logStream("STOP", id, url, "lane=%s (other lane still up)", laneLabel(outputType))
+		return nil
+	}
+	id := s.id
+	mu.Unlock()
+	return stopAllLocked(url, id)
+}
+
+func stopAllLocked(url, id string) error {
+	mu.Lock()
+	s := sessions[url]
+	if s == nil {
+		mu.Unlock()
 		return fmt.Errorf("stream not running")
 	}
 	s.gen++
@@ -303,10 +361,13 @@ func Stop(url string) error {
 	ll := s.detachLLLocked()
 	s.stopMP4Locked()
 	s.running = false
+	s.wantLL = false
+	s.wantRTC = false
+	s.llRef = 0
+	s.rtcRef = 0
 	s.stopAILocked()
 	s.last = ""
 	delete(sessions, url)
-	id := s.id
 	mu.Unlock()
 	if proc != nil {
 		_ = proc.Kill()
@@ -322,6 +383,54 @@ func Stop(url string) error {
 	wipe(id)
 	logStream("STOP", id, url, "ok")
 	return nil
+}
+
+func (s *session) bumpLaneRef(outputType int) {
+	if outputType == 7 {
+		s.rtcRef++
+		s.wantRTC = true
+		return
+	}
+	s.llRef++
+	s.wantLL = true
+}
+
+func (s *session) unbumpLaneRef(outputType int) {
+	if outputType == 7 {
+		if s.rtcRef > 0 {
+			s.rtcRef--
+		}
+		if s.rtcRef == 0 {
+			s.wantRTC = false
+		}
+		return
+	}
+	if s.llRef > 0 {
+		s.llRef--
+	}
+	if s.llRef == 0 {
+		s.wantLL = false
+	}
+}
+
+func (s *session) releaseLaneRef(outputType int) {
+	if outputType == 7 {
+		if s.rtcRef > 0 {
+			s.rtcRef--
+		}
+		if s.rtcRef == 0 {
+			s.wantRTC = false
+			s.stopRTCLocked()
+		}
+		return
+	}
+	if s.llRef > 0 {
+		s.llRef--
+	}
+	if s.llRef == 0 {
+		s.wantLL = false
+		s.stopLLLocked()
+	}
 }
 
 func mcastIP(raw string) net.IP {
@@ -352,12 +461,23 @@ func siblingSockets(ip net.IP, except *net.UDPConn) []*net.UDPConn {
 // videowall can play HLS and WebRTC from the same ingest URL. /play still
 // follows s.out (latest start). Caller holds mu.
 func (s *session) setLaneLocked(outputType int) error {
+	if outputType != 6 && outputType != 7 {
+		return fmt.Errorf("output_type must be 6 or 7")
+	}
+	prevOut, prevRTC := s.out, s.wantRTC
 	s.out = outputType
 	if outputType == 7 {
-		s.wantRTC = true
-		return s.ensureRTCLocked()
+		if err := s.ensureRTCLocked(); err != nil {
+			s.out, s.wantRTC = prevOut, prevRTC
+			return err
+		}
+		return nil
 	}
-	return s.startLLLocked()
+	if err := s.startLLLocked(); err != nil {
+		s.out = prevOut
+		return err
+	}
+	return nil
 }
 
 func (s *session) ensureRTCLocked() error {
@@ -383,9 +503,9 @@ func (s *session) want(my, typ int) bool {
 		return false
 	}
 	if typ == 6 {
-		return s.ll != nil || s.out == 6
+		return s.wantLL
 	}
-	return s.wantRTC || s.rtcHub != nil || s.out == 7
+	return s.wantRTC
 }
 
 func (s *session) loop(my int) {

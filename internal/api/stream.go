@@ -185,31 +185,40 @@ async function startRTC() {
       const vr = await fetch('/webrtc/` + id + `/viewers', {method:'POST'});
       if (!vr.ok) throw new Error('viewer ' + vr.status);
       const slot = await vr.json();
+      const ff = /Firefox\\//i.test(navigator.userAgent);
       const local = location.hostname === '127.0.0.1' || location.hostname === 'localhost' || location.hostname === '[::1]';
       const iceServers = local ? [{urls: 'stun:stun.services.mozilla.com:3478'}] : [];
       pc = new RTCPeerConnection({iceServers});
       const ovdc = pc.createDataChannel(slot.channel, {negotiated:true, id: slot.dc_id});
       ovdc.onmessage = e => { try { feedOv(JSON.parse(e.data)); } catch (x) {} };
-      pc.ontrack = e => { try { e.receiver.jitterBufferTarget = 200; e.receiver.playoutDelayHint = 0.2; } catch (x) {} v.srcObject = (e.streams && e.streams[0]) ? e.streams[0] : new MediaStream([e.track]); v.play().catch(()=>{}); };
+      pc.ontrack = e => {
+        const jt = ff ? 120 : 200, pd = ff ? 0.12 : 0.2;
+        try { e.receiver.jitterBufferTarget = jt; e.receiver.playoutDelayHint = pd; } catch (x) {}
+        v.srcObject = (e.streams && e.streams[0]) ? e.streams[0] : new MediaStream([e.track]);
+        v.play().catch(()=>{});
+      };
       pc.addTransceiver('video', {direction: 'recvonly'});
       try {
         const tr = pc.getTransceivers()[0];
         const cs = RTCRtpReceiver.getCapabilities('video');
-        const ff = /Firefox\\//i.test(navigator.userAgent);
-        if (!ff && tr && tr.setCodecPreferences && cs) {
+        if (tr && tr.setCodecPreferences && cs) {
           const pref = [];
           const add = xs => { for (const c of xs) if (!pref.includes(c)) pref.push(c); };
           const h = cs.codecs.filter(c => /H264/i.test(c.mimeType) && /packetization-mode=1/.test(c.sdpFmtpLine||''));
-          // Prefer Main/High HW paths first (cameras are avc1.4d0029). Baseline
-          // 42e01f first makes Chrome ICE-connect then stay black on Main.
-          add(h.filter(c => /profile-level-id=(4d|64)/i.test(c.sdpFmtpLine||'')));
-          add(h.filter(c => !/42e01f/.test(c.sdpFmtpLine||'')));
+          if (ff) {
+            add(h.filter(c => /profile-level-id=42/i.test(c.sdpFmtpLine||'')));
+            add(h);
+          } else {
+            add(h.filter(c => /profile-level-id=(4d|64)/i.test(c.sdpFmtpLine||'')));
+            add(h.filter(c => !/42e01f/.test(c.sdpFmtpLine||'')));
+          }
           add(h);
           add(cs.codecs);
           tr.setCodecPreferences(pref);
         }
       } catch (x) {}
       await pc.setLocalDescription(await pc.createOffer());
+      const gatherMs = ff && local ? 5000 : 800;
       await Promise.race([
         new Promise(res => {
           if (pc.iceGatheringState === 'complete') return res();
@@ -220,10 +229,10 @@ async function startRTC() {
         new Promise(res => {
           pc.addEventListener('icecandidate', function h(ev) {
             const c = ev.candidate && ev.candidate.candidate;
-            if (c && c.indexOf('typ host') >= 0 && c.indexOf('.local') < 0) { pc.removeEventListener('icecandidate', h); res(); }
+            if (c && c.indexOf('typ host') >= 0 && (ff || c.indexOf('.local') < 0)) { pc.removeEventListener('icecandidate', h); res(); }
           });
         }),
-        new Promise(r => setTimeout(r, 800))
+        new Promise(r => setTimeout(r, gatherMs))
       ]);
       let offerSdp = pc.localDescription.sdp.replaceAll('packetization-mode=0', 'packetization-mode=1');
       offerSdp = offerSdp.split(/\r?\n/).filter(l => {
@@ -291,7 +300,13 @@ func registerStream(r *gin.Engine) {
 			c.JSON(http.StatusNotFound, gin.H{"message": "unknown stream"})
 			return
 		}
-		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(watchPage(id, m.OutputType)))
+		lane := m.OutputType
+		if q := c.Query("lane"); q != "" {
+			if n, err := strconv.Atoi(q); err == nil && (n == 6 || n == 7) {
+				lane = n
+			}
+		}
+		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(watchPage(id, lane)))
 	})
 	r.GET("/stream/meta", func(c *gin.Context) {
 		c.JSON(http.StatusOK, stream.Status())
@@ -336,7 +351,7 @@ func registerStream(r *gin.Engine) {
 		if !ok {
 			return
 		}
-		answer, err := stream.RTCAnswerViewer(c.Param("id"), c.Param("viewer"), desc, stream.ClientLoopback(c.ClientIP()))
+		answer, err := stream.RTCAnswerViewer(c.Param("id"), c.Param("viewer"), desc, stream.LoopbackOffer(c.ClientIP(), desc.SDP))
 		if err != nil {
 			writeRTCErr(c, err)
 			return
@@ -348,7 +363,7 @@ func registerStream(r *gin.Engine) {
 		if !ok {
 			return
 		}
-		answer, err := stream.RTCAnswer(c.Param("id"), desc, stream.ClientLoopback(c.ClientIP()))
+		answer, err := stream.RTCAnswer(c.Param("id"), desc, stream.LoopbackOffer(c.ClientIP(), desc.SDP))
 		if err != nil {
 			writeRTCErr(c, err)
 			return
@@ -378,10 +393,17 @@ func registerStream(r *gin.Engine) {
 	})
 	r.POST("/stream/stop", func(c *gin.Context) {
 		var req struct {
-			URL string `json:"url"`
+			URL        string `json:"url"`
+			OutputType int    `json:"output_type"`
 		}
 		_ = c.ShouldBindJSON(&req)
-		if err := stream.Stop(req.URL); err != nil {
+		var err error
+		if req.OutputType == 6 || req.OutputType == 7 {
+			err = stream.StopLane(req.URL, req.OutputType)
+		} else {
+			err = stream.Stop(req.URL)
+		}
+		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"message": err.Error()})
 			return
 		}

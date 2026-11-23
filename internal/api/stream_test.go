@@ -31,14 +31,17 @@ func TestPlayerPagesAreSingleLane(t *testing.T) {
 	if strings.Count(rtc, "<video") != 1 || strings.Contains(rtc, "hls.js") || strings.Contains(rtc, "index.m3u8") {
 		t.Fatal("output_type 7 must be WebRTC only")
 	}
-	if !strings.Contains(rtc, "stun.services.mozilla.com") || !strings.Contains(rtc, "setTimeout(r, 800)") {
+	if !strings.Contains(rtc, "stun.services.mozilla.com") || !strings.Contains(rtc, "gatherMs") {
 		t.Fatal("WebRTC page must use Mozilla STUN on localhost without stalling gather")
 	}
 	if !strings.Contains(rtc, "new MediaStream([e.track])") {
 		t.Fatal("Firefox ontrack often has empty streams")
 	}
-	if !strings.Contains(rtc, "setCodecPreferences") || !strings.Contains(rtc, "profile-level-id=(4d|64)") {
-		t.Fatal("prefer Main/High H264 over Baseline so Main cameras are not black")
+	if !strings.Contains(rtc, "setCodecPreferences") || !strings.Contains(rtc, "profile-level-id=42") {
+		t.Fatal("Firefox needs Baseline H264 preference on local WebRTC")
+	}
+	if !strings.Contains(rtc, "profile-level-id=(4d|64)") {
+		t.Fatal("Chrome must still prefer Main/High on WebRTC play page")
 	}
 	if !strings.Contains(rtc, "no video") {
 		t.Fatal("ICE-connected black must re-offer")
@@ -46,8 +49,8 @@ func TestPlayerPagesAreSingleLane(t *testing.T) {
 	if !strings.Contains(rtc, "frozen") {
 		t.Fatal("Chrome stuck currentTime must re-offer")
 	}
-	if !strings.Contains(rtc, "jitterBufferTarget = 200") || !strings.Contains(rtc, "playoutDelayHint = 0.2") {
-		t.Fatal("WebRTC must cap Chrome jitter buffer without a 50ms underrun")
+	if !strings.Contains(rtc, "jitterBufferTarget") || !strings.Contains(rtc, "playoutDelayHint") {
+		t.Fatal("WebRTC must set per-browser jitter buffer targets")
 	}
 	if !strings.Contains(trackerJS, "ovCur.width") {
 		t.Fatal("overlay must scale from payload size, not wait for a painted WebRTC frame")

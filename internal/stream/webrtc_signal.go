@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -59,6 +60,15 @@ func ClientLoopback(remote string) bool {
 		host = h
 	}
 	return host == "127.0.0.1" || host == "::1"
+}
+
+// LoopbackOffer is local demo: API loopback or Firefox mDNS / 127.0.0.1 in the SDP.
+func LoopbackOffer(remote, sdp string) bool {
+	if ClientLoopback(remote) {
+		return true
+	}
+	sdp = strings.ToLower(sdp)
+	return strings.Contains(sdp, "127.0.0.1") || strings.Contains(sdp, ".local")
 }
 
 func bindRTCPort(id string) (net.PacketConn, int, error) {
