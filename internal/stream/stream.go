@@ -69,7 +69,8 @@ type session struct {
 	out                  int     // 6 = LL-HLS, 7 = WebRTC; latest start is /play only
 	wantLL               bool
 	wantRTC              bool
-	llRef                int // Start/Stop per lane; ingest stays while either ref > 0
+	remuxRTC             bool // gst process includes the openh264 branch
+	llRef                int  // Start/Stop per lane; ingest stays while either ref > 0
 	rtcRef               int
 	ll                   *hls.Hub
 	llReady              atomic.Bool
@@ -562,7 +563,11 @@ func (s *session) loop(my int) {
 // from sniff into gohlslib (no remuxer).
 func (s *session) shareRemux(my int, in string) {
 	for s.alive(my) {
-		if !s.wantEither(my) {
+		mu.Lock()
+		ok := s.gen == my && (s.wantLL || s.wantRTC)
+		rtc := ok && s.wantRTC
+		mu.Unlock()
+		if !ok {
 			time.Sleep(200 * time.Millisecond)
 			continue
 		}
@@ -577,23 +582,39 @@ func (s *session) shareRemux(my int, in string) {
 			time.Sleep(2 * time.Second)
 			continue
 		}
-		rconn, rport, err := bindRTCPort(s.id)
-		if err != nil {
-			_ = hconn.Close()
-			s.set(err.Error())
-			time.Sleep(2 * time.Second)
-			continue
+		var rconn net.PacketConn
+		var rport int
+		if rtc {
+			rconn, rport, err = bindRTCPort(s.id)
+			if err != nil {
+				_ = hconn.Close()
+				s.set(err.Error())
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			go s.pumpRTP(my, rconn, nil)
 		}
 		go s.pumpLL(my, hconn)
-		go s.pumpRTP(my, rconn, nil)
-		s.runFF(my, 0, gstRTPCmd(in, hport, rport))
+		mu.Lock()
+		if s.gen == my {
+			s.remuxRTC = rtc
+		}
+		mu.Unlock()
+		if rtc {
+			s.runFF(my, 0, gstRTPCmd(in, hport, rport))
+		} else {
+			s.runFF(my, 0, gstRTPCmd(in, hport))
+		}
+		mu.Lock()
+		if s.gen == my {
+			s.remuxRTC = false
+		}
+		mu.Unlock()
 		_ = hconn.Close()
-		_ = rconn.Close()
+		if rconn != nil {
+			_ = rconn.Close()
+		}
 	}
-}
-
-func (s *session) wantEither(my int) bool {
-	return s.want(my, 6) || s.want(my, 7)
 }
 
 func (s *session) pumpLL(my int, conn net.PacketConn) {
@@ -922,10 +943,16 @@ func browserPlay(id string) string {
 }
 
 func (s *session) keepRun(my, typ int) bool {
-	if typ == 0 {
-		return s.wantEither(my)
+	if typ != 0 {
+		return s.want(my, typ)
 	}
-	return s.want(my, typ)
+	mu.Lock()
+	defer mu.Unlock()
+	if s.gen != my || (!s.wantLL && !s.wantRTC) {
+		return false
+	}
+	// LL-HLS-only gst has no encoder. WebRTC must rebuild that process.
+	return !s.wantRTC || s.remuxRTC
 }
 
 func runLabel(t int) string {

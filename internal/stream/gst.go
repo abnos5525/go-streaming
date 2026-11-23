@@ -118,8 +118,12 @@ func gstRTPCmd(in string, ports ...int) *exec.Cmd {
 	for i, port := range ports[1:] {
 		args = append(args, "t.", "!", "queue")
 		if i == 0 {
+			// 720p Baseline: a 1080p IDR does not fit the viewer queue, and
+			// Firefox OpenH264 will not decode level 4.0 (profile 42e028).
 			args = append(args,
 				"!", "avdec_h264",
+				"!", "videoscale",
+				"!", "video/x-raw,width=1280,height=720",
 				"!", "openh264enc", "bitrate=2500000", "complexity=low",
 				"!", "h264parse", "config-interval=-1",
 				"!", "rtph264pay", "config-interval=-1", "pt=96",

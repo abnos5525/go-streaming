@@ -7,10 +7,12 @@ export function LiveView({
   origin,
   mediaURL,
   outputType,
+  active = true,
 }: {
   origin: string;
   mediaURL: string;
   outputType: 6 | 7;
+  active?: boolean;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const id = mediaURL.match(/\/(?:hls|webrtc)\/([0-9a-f]{16})\//i)?.[1] ?? "";
@@ -66,11 +68,17 @@ export function LiveView({
 
     let closed = false;
     let pc: RTCPeerConnection | null = null;
+    const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
     void (async () => {
-      for (let attempt = 0; attempt < 3 && !closed; attempt++) {
+      while (!closed) {
+        if (!(await webrtcReady(origin, id, () => closed))) return;
         pc?.close();
         const viewers = await fetch(`${origin}/webrtc/${id}/viewers`, { method: "POST" });
-        if (!viewers.ok || closed) return;
+        if (closed) return;
+        if (!viewers.ok) {
+          await sleep(400);
+          continue;
+        }
         const slot = (await viewers.json()) as Slot;
         pc = new RTCPeerConnection({ iceServers: loopbackIce() });
         pc.addTransceiver("video", { direction: "recvonly" });
@@ -108,12 +116,17 @@ export function LiveView({
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ sdp, type: pc.localDescription.type }),
           });
-          if (!answer.ok || closed) continue;
+          if (!answer.ok || closed) {
+            await sleep(400);
+            continue;
+          }
           await pc.setRemoteDescription(await answer.json());
           arm();
-          return;
+          while (!closed && pc.connectionState !== "failed" && pc.iceConnectionState !== "failed") {
+            if (await videoShowsFrame(video)) return;
+          }
         } catch {
-          /* next attempt */
+          await sleep(400);
         }
       }
     })();
@@ -122,6 +135,14 @@ export function LiveView({
       pc?.close();
     };
   }, [id, mediaURL, origin, outputType]);
+
+  useEffect(() => {
+    if (!active) return;
+    const video = videoRef.current;
+    if (!video) return;
+    video.muted = true;
+    void video.play().catch(() => undefined);
+  }, [active]);
 
   return <video ref={videoRef} className="live" autoPlay playsInline muted controls />;
 }
@@ -165,32 +186,6 @@ function preferMainH264(pc: RTCPeerConnection) {
   }
 }
 
-function waitForHost(pc: RTCPeerConnection) {
-  return Promise.race([
-    new Promise<void>((resolve) => {
-      if (pc.iceGatheringState === "complete") return resolve();
-      const done = () => {
-        if (pc.iceGatheringState === "complete") {
-          pc.removeEventListener("icegatheringstatechange", done);
-          resolve();
-        }
-      };
-      pc.addEventListener("icegatheringstatechange", done);
-    }),
-    new Promise<void>((resolve) => {
-      const hit = (event: Event) => {
-        const candidate = (event as RTCPeerConnectionIceEvent).candidate?.candidate ?? "";
-        if (candidate.includes("typ host") && !candidate.includes(".local")) {
-          pc.removeEventListener("icecandidate", hit);
-          resolve();
-        }
-      };
-      pc.addEventListener("icecandidate", hit);
-    }),
-    new Promise<void>((resolve) => window.setTimeout(resolve, isLoopbackOrigin() ? 2500 : 800)),
-  ]);
-}
-
 function firefoxUA() {
   return /Firefox\//i.test(navigator.userAgent);
 }
@@ -205,8 +200,9 @@ function loopbackIce(): RTCIceServer[] {
 }
 
 function waitForICE(pc: RTCPeerConnection) {
-  if (firefoxUA() && isLoopbackOrigin()) {
-    return new Promise<void>((resolve) => {
+  const cap = isLoopbackOrigin() ? 400 : 800;
+  return Promise.race([
+    new Promise<void>((resolve) => {
       if (pc.iceGatheringState === "complete") return resolve();
       const done = () => {
         if (pc.iceGatheringState === "complete") {
@@ -215,10 +211,54 @@ function waitForICE(pc: RTCPeerConnection) {
         }
       };
       pc.addEventListener("icegatheringstatechange", done);
-      window.setTimeout(resolve, 5000);
-    });
+    }),
+    new Promise<void>((resolve) => {
+      const hit = (event: Event) => {
+        const candidate = (event as RTCPeerConnectionIceEvent).candidate?.candidate ?? "";
+        const host = candidate.includes("typ host");
+        const usable = host && (firefoxUA() || !candidate.includes(".local"));
+        if (usable) {
+          pc.removeEventListener("icecandidate", hit);
+          resolve();
+        }
+      };
+      pc.addEventListener("icecandidate", hit);
+    }),
+    new Promise<void>((resolve) => window.setTimeout(resolve, cap)),
+  ]);
+}
+
+async function webrtcReady(origin: string, id: string, closed: () => boolean) {
+  while (!closed()) {
+    try {
+      const res = await fetch(`${origin}/stream/meta/${id}`);
+      if (res.ok) {
+        const body = (await res.json()) as { webrtc_ready?: boolean };
+        if (body.webrtc_ready) return true;
+      }
+    } catch {
+      /* meta while the lane is still arming */
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 250));
   }
-  return waitForHost(pc);
+  return false;
+}
+
+function videoShowsFrame(video: HTMLVideoElement) {
+  return new Promise<boolean>((resolve) => {
+    const timer = window.setTimeout(() => {
+      video.removeEventListener("resize", done);
+      resolve(video.videoWidth > 0);
+    }, 6000);
+    const done = () => {
+      if (video.videoWidth <= 0) return;
+      window.clearTimeout(timer);
+      video.removeEventListener("resize", done);
+      resolve(true);
+    };
+    video.addEventListener("resize", done);
+    if (video.videoWidth > 0) done();
+  });
 }
 
 function forcePacketMode1(sdp: string) {

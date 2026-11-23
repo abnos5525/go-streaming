@@ -114,6 +114,16 @@ func IceGatherWait() time.Duration {
 	return 2 * time.Second
 }
 
+// GatherWait is how long the answer waits for host candidates. A loopback
+// page already has 127.0.0.1; blocking the full multi-NIC gather makes every
+// slide switch look frozen.
+func GatherWait(loopback bool) time.Duration {
+	if loopback {
+		return 200 * time.Millisecond
+	}
+	return IceGatherWait()
+}
+
 func newPeerConnection(cap pion.RTPCodecCapability, firefoxMDNS, loopback bool) (*pion.PeerConnection, error) {
 	se := pion.SettingEngine{}
 	if firefoxMDNS {

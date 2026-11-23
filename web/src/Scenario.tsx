@@ -7,7 +7,20 @@ import type { PtzAck } from "@/ptzSocket";
 
 type StartBody = { url: string; output_type: number };
 const demoCamera = "rtsp://stream.strba.sk:1935/strba/VYHLAD_JAZERO.stream";
+const squareCamera = "rtsp://stream.strba.sk:1935/strba/VYHLAD_NAMESTIE.stream";
 const localCamera = "udp://127.0.0.1:5600"; // server starts ball feed on Start; GST_ROOT in .env
+
+const cameraButtons = [
+  { source: demoCamera, label: "دوربین دریاچه" },
+  { source: squareCamera, label: "دوربین میدان" },
+  { source: localCamera, label: "تصویر محلی" },
+] as const;
+
+type Slide = { source: string; label: string; mediaURL: string; lane: 6 | 7 };
+
+function cameraLabel(source: string) {
+  return cameraButtons.find((cam) => cam.source === source)?.label ?? "دوربین";
+}
 
 function streamId(mediaURL: string) {
   return mediaURL.match(/\/(?:hls|webrtc)\/([0-9a-f]{16})\//i)?.[1] ?? "";
@@ -33,7 +46,8 @@ async function apiError(res: Response) {
 export function Scenario() {
   const [source, setSource] = useState(demoCamera);
   const [outputType, setOutputType] = useState<6 | 7>(6);
-  const [mediaURL, setMediaURL] = useState("");
+  const [slides, setSlides] = useState<Slide[]>([]);
+  const [slideAt, setSlideAt] = useState(0);
   const [error, setError] = useState("");
   const [token, setToken] = useState("");
   const [tokenReady, setTokenReady] = useState(false);
@@ -45,8 +59,12 @@ export function Scenario() {
   const viewRef = useRef<HTMLDivElement>(null);
 
   const origin = apiBaseURL;
+  const active = slides[Math.min(slideAt, Math.max(slides.length - 1, 0))];
+  const mediaURL = active?.mediaURL ?? "";
   const sessionId = streamId(mediaURL);
-  const playMediaURL = sessionId ? playbackURL(origin, sessionId, outputType) : mediaURL;
+  const viewingThis = Boolean(active && active.source === source.trim());
+  const lane: 6 | 7 = viewingThis && active ? active.lane : outputType;
+  const playMediaURL = sessionId ? playbackURL(origin, sessionId, active?.lane ?? outputType) : mediaURL;
   const playerURL = sessionId ? playURL(playMediaURL) : "";
 
   const onPtzOutput = useCallback((ack: PtzAck) => {
@@ -86,18 +104,25 @@ export function Scenario() {
             webrtc_ready?: boolean;
           };
           setLiveError(body.error ?? "");
-          setStreamLive(outputType === 7 ? body.webrtc_ready === true : body.hls_ready === true);
+          const laneNow = active?.lane ?? outputType;
+          setStreamLive(laneNow === 7 ? body.webrtc_ready === true : body.hls_ready === true);
         })
         .catch(() => undefined);
     };
     meta();
     const timer = window.setInterval(meta, 2000);
     return () => window.clearInterval(timer);
-  }, [mediaURL, origin, outputType]);
+  }, [mediaURL, origin, active?.lane, outputType]);
 
+  const scrolled = useRef(false);
   useEffect(() => {
-    if (!mediaURL) return;
-    viewRef.current?.scrollIntoView({ block: "center" });
+    if (!mediaURL) {
+      scrolled.current = false;
+      return;
+    }
+    if (scrolled.current) return;
+    scrolled.current = true;
+    viewRef.current?.scrollIntoView({ block: "nearest" });
   }, [mediaURL]);
 
   useEffect(() => {
@@ -145,10 +170,19 @@ export function Scenario() {
       if (!res.ok) throw new Error(await apiError(res));
       const data = (await res.json()) as { url?: string };
       if (!data.url) throw new Error("پاسخ بدون url");
+      const src = source.trim();
+      const slide: Slide = { source: src, label: cameraLabel(src), mediaURL: data.url, lane };
       setOutputType(lane);
-      setMediaURL(data.url);
+      setSlides((prev) => {
+        const at = prev.findIndex((item) => item.source === src);
+        if (at >= 0) {
+          setSlideAt(at);
+          return prev.map((item, i) => (i === at ? slide : item));
+        }
+        setSlideAt(prev.length);
+        return [...prev, slide];
+      });
     } catch (err) {
-      if (!sessionId) setMediaURL("");
       setError(err instanceof Error ? err.message : "start failed");
     } finally {
       setBusy(false);
@@ -160,8 +194,8 @@ export function Scenario() {
   }
 
   function onOutputTypeChange(next: 6 | 7) {
-    if (next === outputType) return;
-    if (!sessionId) {
+    if (next === lane) return;
+    if (!viewingThis) {
       setOutputType(next);
       return;
     }
@@ -172,13 +206,18 @@ export function Scenario() {
     setBusy(true);
     setError("");
     try {
+      const src = (active?.source || source).trim();
       const res = await fetch(`${origin}/stream/stop`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: source.trim(), output_type: outputType }),
+        body: JSON.stringify({ url: src, output_type: active?.lane ?? outputType }),
       });
       if (!res.ok) throw new Error(await apiError(res));
-      setMediaURL("");
+      setSlides((prev) => {
+        const next = prev.filter((item) => item.source !== src);
+        setSlideAt((at) => Math.max(0, Math.min(at, next.length - 1)));
+        return next;
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "stop failed");
     } finally {
@@ -202,14 +241,13 @@ export function Scenario() {
           آدرس منبع
           <input value={source} onChange={(event) => setSource(event.target.value)} spellCheck={false} />
         </label>
-        <p className="world-hint">آدرس پیش‌فرض دوربین عمومی دریاچه است. Start همان تصویر زنده را پخش می‌کند. دکمهٔ تصویر محلی توپ آزمایشی را می‌گذارد.</p>
+        <p className="world-hint">دوربین دریاچه را Start کنید، بعد دوربین میدان را هم Start کنید. روی تصویر هاور کنید تا بین زنده‌ها جابه‌جا شوید.</p>
         <div className="row">
-          <Button type="button" disabled={busy} onClick={() => setSource(demoCamera)}>
-            دوربین دریاچه
-          </Button>
-          <Button type="button" disabled={busy} onClick={() => setSource(localCamera)}>
-            تصویر محلی
-          </Button>
+          {cameraButtons.map((cam) => (
+            <Button key={cam.source} type="button" disabled={busy} onClick={() => setSource(cam.source)}>
+              {cam.label}
+            </Button>
+          ))}
         </div>
         <label>
           توکن JWT
@@ -229,7 +267,7 @@ export function Scenario() {
         <label>
           نوع خروجی
           <select
-            value={outputType}
+            value={lane}
             disabled={busy}
             onChange={(event) => onOutputTypeChange(event.target.value === "7" ? 7 : 6)}
           >
@@ -251,11 +289,37 @@ export function Scenario() {
             <StreamPanel
               origin={origin}
               mediaURL={playMediaURL || mediaURL}
-              outputType={outputType}
+              panes={slides.map((slide, index) => {
+                const id = streamId(slide.mediaURL);
+                return {
+                  key: `${id}-${slide.lane}`,
+                  mediaURL: id ? playbackURL(origin, id, slide.lane) : slide.mediaURL,
+                  outputType: slide.lane,
+                  active: index === Math.min(slideAt, slides.length - 1),
+                };
+              })}
               playerURL={playerURL}
               liveError={liveError}
               outputs={streamOutputs}
-              viewKey={`${sessionId}-${outputType}`}
+              slide={
+                slides.length > 1 && active
+                  ? {
+                      label: active.label,
+                      onPrev: () => {
+                        const at = (slideAt - 1 + slides.length) % slides.length;
+                        setSlideAt(at);
+                        setSource(slides[at].source);
+                        setOutputType(slides[at].lane);
+                      },
+                      onNext: () => {
+                        const at = (slideAt + 1) % slides.length;
+                        setSlideAt(at);
+                        setSource(slides[at].source);
+                        setOutputType(slides[at].lane);
+                      },
+                    }
+                  : undefined
+              }
             />
             <PtzJoystick
               apiOrigin={origin}

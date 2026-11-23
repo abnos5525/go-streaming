@@ -317,7 +317,7 @@ func answerRTC(id, viewerID, label string, dcID uint16, offer webrtc.SessionDesc
 	// it needs longer or truncated SDP causes ICE flaps that look like freeze.
 	select {
 	case <-webrtc.GatheringCompletePromise(pc):
-	case <-time.After(rtc.IceGatherWait()):
+	case <-time.After(rtc.GatherWait(fromLoopback)):
 	}
 	mu.Lock()
 	if s.gen != my || s.rtcHub != hub {

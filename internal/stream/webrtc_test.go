@@ -15,12 +15,29 @@ func TestGSTRTPCmd(t *testing.T) {
 			t.Fatalf("rtp cmd missing %q: %s", want, s)
 		}
 	}
-	if strings.Contains(s, "x264enc") || strings.Contains(s, "hlssink") {
+	if strings.Contains(s, "x264enc") || strings.Contains(s, "openh264enc") || strings.Contains(s, "hlssink") {
 		t.Fatalf("rtp fallback must stay copy RTP only: %s", s)
 	}
 	dual := strings.Join(gstRTPCmd("in", 11111, 22222).Args, " ")
-	if !strings.Contains(dual, "tee") || !strings.Contains(dual, "openh264enc") || !strings.Contains(dual, "port=22222") {
-		t.Fatalf("dual ingest must baseline-encode WebRTC branch: %s", dual)
+	for _, want := range []string{"tee", "openh264enc", "videoscale", "width=1280,height=720", "port=22222"} {
+		if !strings.Contains(dual, want) {
+			t.Fatalf("dual ingest missing %q: %s", want, dual)
+		}
+	}
+}
+
+func TestKeepRunRebuildsForWebRTC(t *testing.T) {
+	s := &session{gen: 1, wantLL: true}
+	if !s.keepRun(1, 0) {
+		t.Fatal("hls-only ingest must keep running")
+	}
+	s.wantRTC = true
+	if s.keepRun(1, 0) {
+		t.Fatal("hls ingest must restart once webrtc is wanted")
+	}
+	s.remuxRTC = true
+	if !s.keepRun(1, 0) {
+		t.Fatal("dual ingest must stay up")
 	}
 }
 

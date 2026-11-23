@@ -34,6 +34,10 @@ func TestIceGatherWait(t *testing.T) {
 	if IceGatherWait() != 200*time.Millisecond {
 		t.Fatal("HOST_IP gathers one host candidate fast")
 	}
+	t.Setenv("HOST_IP", "")
+	if GatherWait(true) != 200*time.Millisecond {
+		t.Fatal("loopback answer must not wait the full gather")
+	}
 }
 
 func TestPrepareOfferLoopback(t *testing.T) {

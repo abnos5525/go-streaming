@@ -853,11 +853,25 @@ main { flex: 1; position: relative; min-height: 0; }
 }
 
 .scenario .stream-video {
+  position: relative;
   width: 100%;
   background: #000;
   border-radius: 12px;
   overflow: hidden;
   border: 1px solid var(--line);
+}
+
+.scenario .slide-pane {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.scenario .slide-pane.on {
+  position: relative;
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .scenario .ptz-rail {
@@ -1055,6 +1069,45 @@ main { flex: 1; position: relative; min-height: 0; }
   }
 }
 
+.scenario .slide-nav,
+.scenario .slide-label {
+  position: absolute;
+  z-index: 2;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.scenario .stream-video:hover .slide-nav,
+.scenario .stream-video:hover .slide-label,
+.scenario .stream-video:focus-within .slide-nav,
+.scenario .stream-video:focus-within .slide-label {
+  opacity: 1;
+}
+.scenario .slide-nav {
+  direction: ltr;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(8, 14, 20, 0.72);
+  color: #fff;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+}
+.scenario .slide-nav.prev { left: 10px; }
+.scenario .slide-nav.next { right: 10px; }
+.scenario .slide-label {
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(8, 14, 20, 0.72);
+  color: #fff;
+  font-size: 12px;
+}
 .scenario video.live {
   display: block;
   width: 100%;

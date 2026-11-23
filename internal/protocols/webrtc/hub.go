@@ -29,7 +29,7 @@ type Out struct {
 	needKey    atomic.Bool // send-queue gap: skip until next IDR (Chrome freeze)
 }
 
-const outQ = 64
+const outQ = 256 // one 720p IDR is more than 64 RTP packets; a short queue drops the keyframe
 
 // Track is the local RTP track to AddTrack on the peer connection.
 func (o *Out) Track() *pion.TrackLocalStaticRTP { return o.track }

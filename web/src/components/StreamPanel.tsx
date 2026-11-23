@@ -1,24 +1,31 @@
 import { JsonTerminal } from "@/components/JsonTerminal";
 import { LiveView } from "@/LiveView";
 
+export type SlidePane = {
+  key: string;
+  mediaURL: string;
+  outputType: 6 | 7;
+  active: boolean;
+};
+
 type StreamPanelProps = {
   origin: string;
   mediaURL: string;
-  outputType: 6 | 7;
+  panes: SlidePane[];
   playerURL: string;
   liveError: string;
   outputs: unknown;
-  viewKey: string;
+  slide?: { label: string; onPrev: () => void; onNext: () => void };
 };
 
 export function StreamPanel({
   origin,
   mediaURL,
-  outputType,
+  panes,
   playerURL,
   liveError,
   outputs,
-  viewKey,
+  slide,
 }: StreamPanelProps) {
   return (
     <div className="stream-panel" aria-label="پخش زنده">
@@ -26,8 +33,28 @@ export function StreamPanel({
         <a href={mediaURL}>{mediaURL}</a>
       </p>
       <div className="stream-video">
-        {playerURL ? (
-          <LiveView key={viewKey} origin={origin} mediaURL={mediaURL} outputType={outputType} />
+        {playerURL
+          ? panes.map((pane) => (
+              <div key={pane.key} className={pane.active ? "slide-pane on" : "slide-pane"}>
+                <LiveView
+                  origin={origin}
+                  mediaURL={pane.mediaURL}
+                  outputType={pane.outputType}
+                  active={pane.active}
+                />
+              </div>
+            ))
+          : null}
+        {slide ? (
+          <>
+            <button type="button" className="slide-nav prev" onClick={slide.onPrev} aria-label="دوربین قبلی">
+              ‹
+            </button>
+            <button type="button" className="slide-nav next" onClick={slide.onNext} aria-label="دوربین بعدی">
+              ›
+            </button>
+            <span className="slide-label">{slide.label}</span>
+          </>
         ) : null}
       </div>
       {liveError ? <p className="err">{liveError}</p> : null}
