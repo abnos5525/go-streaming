@@ -45,8 +45,8 @@ func TestPrepareOfferLoopback(t *testing.T) {
 	}
 	lan := "v=0\r\na=candidate:1 1 UDP 2122252543 192.168.1.5 54000 typ host\r\n"
 	got = PrepareOfferSDP(lan, true)
-	if !contains(got, "127.0.0.1 54000") || contains(got, "192.168.1.5") {
-		t.Fatalf("loopback must remap LAN host to 127.0.0.1: %q", got)
+	if !contains(got, "192.168.1.5 54000") {
+		t.Fatalf("loopback must keep Firefox LAN host: %q", got)
 	}
 }
 

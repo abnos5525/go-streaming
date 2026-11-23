@@ -67,41 +67,55 @@ export function LiveView({
     let closed = false;
     let pc: RTCPeerConnection | null = null;
     void (async () => {
-      const viewers = await fetch(`${origin}/webrtc/${id}/viewers`, { method: "POST" });
-      if (!viewers.ok || closed) return;
-      const slot = (await viewers.json()) as Slot;
-      pc = new RTCPeerConnection({ iceServers: loopbackIce() });
-      pc.createDataChannel(slot.channel, { negotiated: true, id: slot.dc_id });
-      pc.ontrack = (event) => {
-        const receiver = event.receiver as RTCRtpReceiver & { playoutDelayHint?: number };
-        const ff = firefoxUA();
-        const jt = ff ? 120 : 200;
-        const pd = ff ? 0.12 : 0.2;
+      for (let attempt = 0; attempt < 3 && !closed; attempt++) {
+        pc?.close();
+        const viewers = await fetch(`${origin}/webrtc/${id}/viewers`, { method: "POST" });
+        if (!viewers.ok || closed) return;
+        const slot = (await viewers.json()) as Slot;
+        pc = new RTCPeerConnection({ iceServers: loopbackIce() });
+        pc.addTransceiver("video", { direction: "recvonly" });
+        if (firefoxUA()) preferBaselineH264(pc);
+        else preferMainH264(pc);
+        pc.createDataChannel(slot.channel, { negotiated: true, id: slot.dc_id });
+        pc.ontrack = (event) => {
+          const receiver = event.receiver as RTCRtpReceiver & { playoutDelayHint?: number };
+          const ff = firefoxUA();
+          const jt = ff ? 120 : 200;
+          const pd = ff ? 0.12 : 0.2;
+          try {
+            receiver.jitterBufferTarget = jt;
+            receiver.playoutDelayHint = pd;
+          } catch {
+            void receiver;
+          }
+          video.srcObject = event.streams[0] ?? new MediaStream([event.track]);
+          arm();
+        };
         try {
-          receiver.jitterBufferTarget = jt;
-          receiver.playoutDelayHint = pd;
+          const raw = await pc.createOffer();
+          const offered = { type: raw.type, sdp: forcePacketMode1(raw.sdp ?? "") };
+          try {
+            await pc.setLocalDescription(offered);
+          } catch {
+            await pc.setLocalDescription(raw);
+          }
+          await waitForICE(pc);
+          if (closed || !pc.localDescription) return;
+          const offerURL = slot.offer.startsWith("http") ? slot.offer : `${origin}${slot.offer}`;
+          const sdp = scrubOfferSdp(pc.localDescription.sdp);
+          const answer = await fetch(offerURL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sdp, type: pc.localDescription.type }),
+          });
+          if (!answer.ok || closed) continue;
+          await pc.setRemoteDescription(await answer.json());
+          arm();
+          return;
         } catch {
-          void receiver;
+          /* next attempt */
         }
-        video.srcObject = event.streams[0] ?? new MediaStream([event.track]);
-        arm();
-      };
-      pc.addTransceiver("video", { direction: "recvonly" });
-      if (firefoxUA()) preferBaselineH264(pc);
-      else preferMainH264(pc);
-      await pc.setLocalDescription(await pc.createOffer());
-      await waitForICE(pc);
-      if (closed || !pc.localDescription) return;
-      const offerURL = slot.offer.startsWith("http") ? slot.offer : `${origin}${slot.offer}`;
-      const sdp = scrubOfferSdp(pc.localDescription.sdp);
-      const answer = await fetch(offerURL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sdp, type: pc.localDescription.type }),
-      });
-      if (!answer.ok || closed) return;
-      await pc.setRemoteDescription(await answer.json());
-      arm();
+      }
     })();
     return () => {
       closed = true;
@@ -119,13 +133,9 @@ function preferBaselineH264(pc: RTCPeerConnection) {
   const h264 = caps.codecs.filter(
     (codec) => /H264/i.test(codec.mimeType) && /packetization-mode=1/.test(codec.sdpFmtpLine || ""),
   );
-  const pref: RTCRtpCodec[] = [];
-  const add = (codecs: RTCRtpCodec[]) => {
-    for (const codec of codecs) if (!pref.includes(codec)) pref.push(codec);
-  };
-  add(h264.filter((codec) => /profile-level-id=42/i.test(codec.sdpFmtpLine || "")));
-  add(h264);
-  add(caps.codecs);
+  const baseline = h264.filter((codec) => /profile-level-id=42/i.test(codec.sdpFmtpLine || ""));
+  const pref = baseline.length > 0 ? baseline : h264;
+  if (pref.length === 0) return;
   try {
     transceiver.setCodecPreferences(pref);
   } catch {
@@ -191,7 +201,7 @@ function isLoopbackOrigin() {
 }
 
 function loopbackIce(): RTCIceServer[] {
-  return isLoopbackOrigin() ? [{ urls: "stun:stun.services.mozilla.com:3478" }] : [];
+  return [];
 }
 
 function waitForICE(pc: RTCPeerConnection) {
@@ -211,8 +221,12 @@ function waitForICE(pc: RTCPeerConnection) {
   return waitForHost(pc);
 }
 
+function forcePacketMode1(sdp: string) {
+  return sdp.replaceAll("packetization-mode=0", "packetization-mode=1");
+}
+
 function scrubOfferSdp(sdp: string) {
-  const fixed = sdp.replaceAll("packetization-mode=0", "packetization-mode=1");
+  const fixed = forcePacketMode1(sdp);
   const keepMdns = firefoxUA() && isLoopbackOrigin();
   return fixed
     .split(/\r?\n/)

@@ -42,18 +42,9 @@ func WebrtcPort(id string) int {
 func PrepareOfferSDP(sdp string, loopback bool) string {
 	sdp = strings.ReplaceAll(sdp, "packetization-mode=0", "packetization-mode=1")
 	if loopback {
+		// Only unresolved mDNS names become loopback. A real LAN host is the
+		// address Firefox is bound to; rewriting it to 127.0.0.1 fails ICE.
 		sdp = mdnsCandidate.ReplaceAllString(sdp, `${1}127.0.0.1${3}`)
-		sdp = loopbackHostCandidate.ReplaceAllStringFunc(sdp, func(line string) string {
-			m := loopbackHostCandidate.FindStringSubmatch(line)
-			if len(m) != 4 {
-				return line
-			}
-			ip := net.ParseIP(m[2])
-			if ip != nil && ip.IsLoopback() {
-				return line
-			}
-			return m[1] + "127.0.0.1" + m[3]
-		})
 		return filterOfferCandidates(sdp)
 	}
 	return ResolveMDNS(filterOfferCandidates(sdp))
@@ -125,15 +116,13 @@ func IceGatherWait() time.Duration {
 
 func newPeerConnection(cap pion.RTPCodecCapability, firefoxMDNS, loopback bool) (*pion.PeerConnection, error) {
 	se := pion.SettingEngine{}
+	if firefoxMDNS {
+		se.SetICEMulticastDNSMode(ice.MulticastDNSModeQueryOnly)
+	}
 	if ip := strings.TrimSpace(os.Getenv("HOST_IP")); ip != "" {
 		se.SetNAT1To1IPs([]string{ip}, pion.ICECandidateTypeHost)
 		se.SetIPFilter(func(a net.IP) bool { return a.To4() != nil && a.String() == ip })
-	} else if loopback {
-		se.SetNAT1To1IPs([]string{"127.0.0.1"}, pion.ICECandidateTypeHost)
-		se.SetIncludeLoopbackCandidate(true)
-		se.SetIPFilter(func(a net.IP) bool { return a.To4() != nil && a.IsLoopback() })
-	} else if firefoxMDNS {
-		se.SetICEMulticastDNSMode(ice.MulticastDNSModeQueryOnly)
+	} else if loopback || firefoxMDNS {
 		se.SetIncludeLoopbackCandidate(true)
 		se.SetIPFilter(func(a net.IP) bool {
 			if a.To4() != nil && a.IsLoopback() {
@@ -159,7 +148,6 @@ func newPeerConnection(cap pion.RTPCodecCapability, firefoxMDNS, loopback bool) 
 }
 
 var mdnsCandidate = regexp.MustCompile(`(a=candidate:\S+ \d+ \S+ \d+ )([A-Za-z0-9-]+\.local)( \d+)`)
-var loopbackHostCandidate = regexp.MustCompile(`(?m)^(a=candidate:\S+ \d+ \S+ \d+ )(\S+)( \d+ typ host)`)
 
 func lookupV4(ctx context.Context, host string) string {
 	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)

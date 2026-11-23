@@ -199,7 +199,7 @@ func (h *Hub) SetParams(sps, pps []byte) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if len(sps) > 0 {
-		h.sps = append([]byte(nil), sps...)
+		h.sps = append([]byte(nil), firefoxSPS(sps)...)
 	}
 	if len(pps) > 0 {
 		h.pps = append([]byte(nil), pps...)

@@ -83,6 +83,10 @@ func TestCapFromIncludesPacketizationAndSprop(t *testing.T) {
 	if strings.Contains(c.SDPFmtpLine, "42e01f") || !strings.Contains(c.SDPFmtpLine, "4d0029") {
 		t.Fatalf("default Baseline blacks Main cameras: %q", c.SDPFmtpLine)
 	}
+	c = CapFrom([]byte{0x67, 0x42, 0xc0, 0x1f, 0xaa}, []byte{0x68, 0xce, 0x06, 0xe2})
+	if !strings.Contains(c.SDPFmtpLine, "profile-level-id=42e01f") {
+		t.Fatalf("openh264 42c0 must be advertised as 42e0 for Firefox: %q", c.SDPFmtpLine)
+	}
 	c = CapFrom([]byte{0x67, 0x42, 0xe0, 0x1e, 0xaa}, []byte{0x68, 0xce, 0x06, 0xe2})
 	if !strings.Contains(c.SDPFmtpLine, "sprop-parameter-sets=") || !strings.Contains(c.SDPFmtpLine, "profile-level-id=42e01e") {
 		t.Fatalf("fmtp=%q", c.SDPFmtpLine)

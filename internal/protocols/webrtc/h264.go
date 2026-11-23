@@ -290,7 +290,19 @@ func stapIDR(src *rtp.Packet, sps, pps, idr []byte) *rtp.Packet {
 
 // CapFrom builds the WebRTC codec line. Without packetization-mode + sprop,
 // browsers often ICE-connect then stay black while LL-HLS (gohlslib) still works.
+// firefoxSPS rewrites OpenH264's 42c0 constraint flags to 42e0. Firefox
+// accepts the answer then decodes zero frames on 42c01f.
+func firefoxSPS(sps []byte) []byte {
+	if len(sps) < 4 || sps[0]&0x1f != 7 || sps[1] != 0x42 || sps[2] != 0xc0 {
+		return sps
+	}
+	out := append([]byte(nil), sps...)
+	out[2] = 0xe0
+	return out
+}
+
 func CapFrom(sps, pps []byte) pion.RTPCodecCapability {
+	sps = firefoxSPS(sps)
 	plid := "4d0029"
 	if len(sps) >= 4 {
 		plid = fmt.Sprintf("%02x%02x%02x", sps[1], sps[2], sps[3])
