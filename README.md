@@ -59,14 +59,19 @@ pnpm install
 pnpm dev
 ```
 
-Open **http://127.0.0.1:5173**.
+With a built SPA, open **http://127.0.0.1:8085/docs/** on the same process as the API (no separate Vite port). For UI development only: `pnpm dev` → **http://127.0.0.1:5173/docs/**.
 
 1. The map is Record → go-streaming → React. **کلمات کلیدی** opens the glossary and lights the matching station.
 2. Click the **go-streaming** card. The inside view has 24 steps: file, method, and the media/control planes for that step.
 3. **سناریوی پخش** calls the live API. Start the Go server first (`go run .` on port `8085`), then Start with a real `udp`/`rtsp` URL. The page shows the playback URL and a link to `/play/{id}`. Stop sends `POST /stream/stop` for the same source URL.
 4. **↩ برگشت به نقشه** returns to the map.
 
-`pnpm build` typechecks and writes `web/dist`. The lockfile is `web/pnpm-lock.yaml`. Do not use npm.
+```bash
+cd web
+pnpm build
+```
+
+Then restart `go run .` from the repo root. The server serves `web/dist` at `/docs/`. Override with `DOCS_ROOT=/path/to/dist` if needed. The lockfile is `web/pnpm-lock.yaml`. Do not use npm.
 
 ### 1. Start a stream
 
@@ -163,7 +168,7 @@ go run ./cmd/token
 go run .
 ```
 
-`cmd/token` prints a token valid for one hour. In the docs scenario page, paste it and press **GET /**. Without the header the same call returns `401`. `POST /stream/start` does not use this token.
+`GET /auth/token` mints a one-hour HS256 JWT when `AUTH_SECRET` is set (same as `go run ./cmd/token`). The docs **scenario** uses **دریافت توکن** to fill a read-only field; **Start** is blocked until then. `GET /` without a valid `Authorization: Bearer` header returns `401`. Stream routes stay public.
 
 On PowerShell, set the variable in the same window before both commands, or rely on `.env` (`AUTH_SECRET` is already set in the local `.env`). On bash, `export` is the same idea.
 
@@ -187,7 +192,9 @@ After **Start**, open `ws://127.0.0.1:8085/ptz?id={session_id}` (same 16-hex id 
 {"type":"ptz:move","x":0,"y":1,"zoom":0,"deviceId":"optional"}
 ```
 
-The server replies with a JSON ack and logs `[ptz]` (no real camera RPC in this repo). The docs **scenario** page connects automatically and shows directional buttons after a successful Start. Overlay stays HTTP poll — not WebSocket.
+The server replies with a JSON ack and logs `[ptz]` (no real camera RPC in this repo). The **scenario** on `/docs/` connects automatically; PTZ output appears in the terminal below the video.
+
+For **تصویر محلی** (`udp://127.0.0.1:5600`), the server starts an internal GStreamer ball feed on Start — no manual `gst-launch` required when `GST_ROOT` is set.
 
 ### Demo camera
 
@@ -197,11 +204,7 @@ The server replies with a JSON ack and logs `[ptz]` (no real camera RPC in this 
 rtsp://stream.strba.sk:1935/strba/VYHLAD_JAZERO.stream
 ```
 
-Start plays that H.264 picture. The scenario button «تصویر محلی» switches to `udp://127.0.0.1:5600`. Publish that picture with GStreamer only if you use the local button:
-
-```powershell
-gst-launch-1.0 videotestsrc is-live=true pattern=ball ! video/x-raw,width=640,height=360,framerate=25/1 ! x264enc tune=zerolatency bitrate=800 speed-preset=ultrafast key-int-max=25 ! rtph264pay pt=96 config-interval=1 ! udpsink host=127.0.0.1 port=5600
-```
+Start plays that H.264 picture. The scenario button «تصویر محلی» switches to `udp://127.0.0.1:5600` and the server publishes the test ball automatically on Start.
 
 RTSP ingest needs GStreamer. Set `GST_ROOT` in `.env` to the install root (for example `D:\gstreamer\PFiles64\gstreamer\1.0\msvc_x86_64`) or put `gst-launch-1.0` on PATH. `GST_ROOT` also sets plugin paths for child pipelines. The play page loads hls.js from `/vendor/hls.min.js` on the same server, and the docs scenario plays the picture in the page.
 

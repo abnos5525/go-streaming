@@ -7,6 +7,7 @@ import (
 
 	"github.com/abnos5525/go-streaming/internal/api"
 	"github.com/abnos5525/go-streaming/internal/config"
+	"github.com/abnos5525/go-streaming/internal/docsweb"
 	"github.com/abnos5525/go-streaming/internal/grpcstream"
 	"github.com/abnos5525/go-streaming/internal/swagger"
 	"github.com/gin-gonic/gin"
@@ -36,6 +37,7 @@ func Run() {
 	r := gin.New()
 	r.Use(gin.Recovery(), cors())
 	swagger.Register(r)
+	docsweb.Register(r)
 	api.Register(r)
 	addr := os.Getenv("GRPC_ADDR")
 	if addr == "" {
@@ -50,6 +52,9 @@ func Run() {
 	log.Print("[boot] READY │ http://127.0.0.1:8085")
 	log.Printf("[boot] GRPC  │ %s", addr)
 	log.Print("[boot] DOCS  │ http://127.0.0.1:8085/api/doc")
+	if docsweb.DistReady() {
+		log.Print("[boot] FLOW  │ http://127.0.0.1:8085/docs/")
+	}
 	log.Print("[boot] API   │ POST /stream/start  POST /stream/stop  GET /play/{id}")
 	log.Fatal(r.Run(":8085"))
 }

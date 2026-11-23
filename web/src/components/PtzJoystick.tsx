@@ -7,6 +7,8 @@ const KNOB_MAX = PAD_SIZE / 2 - KNOB_SIZE / 2 - 6;
 const DEAD_ZONE = 0.08;
 const KEEPALIVE_MS = 800;
 const MIN_SEND_MS = 200;
+// Pad sends only after the pointer actually drags, not on a stationary click (even off-center).
+const MIN_DRAG_PX = 16;
 
 type Vec = { x: number; y: number };
 
@@ -37,6 +39,9 @@ export function PtzJoystick({ apiOrigin, streamId, disabled = false, streamLive 
   const draggingRef = useRef(false);
   const zoomDirRef = useRef(0);
   const lastSentRef = useRef({ x: 0, y: 0, z: 0, t: 0 });
+  const armedRef = useRef(false);
+  const pointerOriginRef = useRef({ x: 0, y: 0 });
+  const pointerClientRef = useRef({ x: 0, y: 0 });
   const interactive = !disabled && Boolean(streamId);
 
   const wireXY = useCallback((v: Vec) => {
@@ -101,6 +106,19 @@ export function PtzJoystick({ apiOrigin, streamId, disabled = false, streamLive 
     }
   }, []);
 
+  const pointerDragPx = useCallback(() => {
+    const o = pointerOriginRef.current;
+    const c = pointerClientRef.current;
+    return Math.hypot(c.x - o.x, c.y - o.y);
+  }, []);
+
+  const tryArm = useCallback(() => {
+    if (armedRef.current) return true;
+    if (pointerDragPx() < MIN_DRAG_PX) return false;
+    armedRef.current = true;
+    return true;
+  }, [pointerDragPx]);
+
   const emitMove = useCallback(
     (v: Vec, zoom: number) => {
       const { x, y } = wireXY(v);
@@ -149,6 +167,11 @@ export function PtzJoystick({ apiOrigin, streamId, disabled = false, streamLive 
     sendHeld(false);
   }, [emitMove, sendHeld]);
 
+  const startLoopIfArmed = useCallback(() => {
+    if (!tryArm()) return;
+    startLoop();
+  }, [startLoop, tryArm]);
+
   const stopAll = useCallback(() => {
     clearTimer();
     vecRef.current = { x: 0, y: 0 };
@@ -177,6 +200,7 @@ export function PtzJoystick({ apiOrigin, streamId, disabled = false, streamLive 
   );
 
   const updateFromPoint = useCallback((clientX: number, clientY: number) => {
+    pointerClientRef.current = { x: clientX, y: clientY };
     const el = padRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
@@ -200,30 +224,36 @@ export function PtzJoystick({ apiOrigin, streamId, disabled = false, streamLive 
       if (!interactive) return;
       e.preventDefault();
       e.currentTarget.setPointerCapture(e.pointerId);
+      armedRef.current = false;
+      pointerOriginRef.current = { x: e.clientX, y: e.clientY };
+      pointerClientRef.current = { x: e.clientX, y: e.clientY };
       draggingRef.current = true;
       setDragging(true);
       updateFromPoint(e.clientX, e.clientY);
-      startLoop();
+      startLoopIfArmed();
     },
-    [interactive, startLoop, updateFromPoint],
+    [interactive, startLoopIfArmed, updateFromPoint],
   );
 
   const onPointerMove = useCallback(
     (e: React.PointerEvent) => {
       if (!draggingRef.current) return;
       updateFromPoint(e.clientX, e.clientY);
-      startLoop();
+      startLoopIfArmed();
     },
-    [startLoop, updateFromPoint],
+    [startLoopIfArmed, updateFromPoint],
   );
 
   const onPointerEnd = useCallback(() => {
     if (!draggingRef.current) return;
     draggingRef.current = false;
     setDragging(false);
+    const wasArmed = armedRef.current;
+    armedRef.current = false;
     setKnob({ x: 0, y: 0 });
     clearTimer();
     vecRef.current = { x: 0, y: 0 };
+    if (!wasArmed) return;
     socketRef.current?.emit(
       "ptz:move",
       { x: 0, y: 0, zoom: zoomDirRef.current, deviceId: deviceIdRef.current },

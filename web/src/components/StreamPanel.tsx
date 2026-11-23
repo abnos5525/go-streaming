@@ -8,6 +8,7 @@ type StreamPanelProps = {
   playerURL: string;
   liveError: string;
   outputs: unknown;
+  viewKey: string;
 };
 
 export function StreamPanel({
@@ -17,6 +18,7 @@ export function StreamPanel({
   playerURL,
   liveError,
   outputs,
+  viewKey,
 }: StreamPanelProps) {
   return (
     <div className="stream-panel" aria-label="پخش زنده">
@@ -24,7 +26,9 @@ export function StreamPanel({
         <a href={mediaURL}>{mediaURL}</a>
       </p>
       <div className="stream-video">
-        {playerURL ? <LiveView origin={origin} mediaURL={mediaURL} outputType={outputType} /> : null}
+        {playerURL ? (
+          <LiveView key={viewKey} origin={origin} mediaURL={mediaURL} outputType={outputType} />
+        ) : null}
       </div>
       {liveError ? <p className="err">{liveError}</p> : null}
       <JsonTerminal

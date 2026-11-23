@@ -19,6 +19,12 @@ function playURL(mediaURL: string) {
   return `${new URL(mediaURL).origin}/play/${id}`;
 }
 
+function playbackURL(origin: string, id: string, lane: 6 | 7) {
+  if (!id) return "";
+  const base = origin.replace(/\/$/, "");
+  return lane === 6 ? `${base}/hls/${id}/index.m3u8` : `${base}/webrtc/${id}/offer`;
+}
+
 async function apiError(res: Response) {
   const body = (await res.json().catch(() => null)) as { message?: string } | null;
   return body?.message || `${res.status}`;
@@ -30,7 +36,8 @@ export function Scenario() {
   const [mediaURL, setMediaURL] = useState("");
   const [error, setError] = useState("");
   const [token, setToken] = useState("");
-  const [gate, setGate] = useState("");
+  const [tokenReady, setTokenReady] = useState(false);
+  const [toast, setToast] = useState("");
   const [liveError, setLiveError] = useState("");
   const [streamLive, setStreamLive] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -38,8 +45,9 @@ export function Scenario() {
   const viewRef = useRef<HTMLDivElement>(null);
 
   const origin = apiBaseURL;
-  const playerURL = mediaURL ? playURL(mediaURL) : "";
   const sessionId = streamId(mediaURL);
+  const playMediaURL = sessionId ? playbackURL(origin, sessionId, outputType) : mediaURL;
+  const playerURL = sessionId ? playURL(playMediaURL) : "";
 
   const onPtzOutput = useCallback((ack: PtzAck) => {
     setPtzOut(ack);
@@ -72,26 +80,62 @@ export function Scenario() {
       void fetch(`${origin}/stream/meta/${id}`)
         .then(async (res) => {
           if (!res.ok) return;
-          const body = (await res.json()) as { error?: string; ready?: boolean };
+          const body = (await res.json()) as {
+            error?: string;
+            hls_ready?: boolean;
+            webrtc_ready?: boolean;
+          };
           setLiveError(body.error ?? "");
-          setStreamLive(body.ready === true);
+          setStreamLive(outputType === 7 ? body.webrtc_ready === true : body.hls_ready === true);
         })
         .catch(() => undefined);
     };
     meta();
     const timer = window.setInterval(meta, 2000);
     return () => window.clearInterval(timer);
-  }, [mediaURL, origin]);
+  }, [mediaURL, origin, outputType]);
 
   useEffect(() => {
     if (!mediaURL) return;
     viewRef.current?.scrollIntoView({ block: "center" });
   }, [mediaURL]);
 
-  async function start() {
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(""), 4500);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
+
+  async function fetchToken() {
     setBusy(true);
     setError("");
-    const body: StartBody = { url: source.trim(), output_type: outputType };
+    try {
+      const res = await fetch(`${origin}/auth/token`);
+      const body = (await res.json().catch(() => null)) as { token?: string; message?: string } | null;
+      if (!res.ok || !body?.token) {
+        throw new Error(body?.message || (await apiError(res)));
+      }
+      setToken(body.token);
+      setTokenReady(true);
+      const check = await fetch(`${origin}/`, { headers: { Authorization: `Bearer ${body.token}` } });
+      if (!check.ok) throw new Error("توکن دریافت شد ولی GET / رد شد");
+    } catch (err) {
+      setToken("");
+      setTokenReady(false);
+      setToast(err instanceof Error ? err.message : "دریافت توکن ناموفق");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function armStream(lane: 6 | 7) {
+    if (!tokenReady || !token.trim()) {
+      setToast("خطای دسترسی — ابتدا توکن را دریافت کنید");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    const body: StartBody = { url: source.trim(), output_type: lane };
     try {
       const res = await fetch(`${origin}/stream/start`, {
         method: "POST",
@@ -101,13 +145,27 @@ export function Scenario() {
       if (!res.ok) throw new Error(await apiError(res));
       const data = (await res.json()) as { url?: string };
       if (!data.url) throw new Error("پاسخ بدون url");
+      setOutputType(lane);
       setMediaURL(data.url);
     } catch (err) {
-      setMediaURL("");
+      if (!sessionId) setMediaURL("");
       setError(err instanceof Error ? err.message : "start failed");
     } finally {
       setBusy(false);
     }
+  }
+
+  async function start() {
+    await armStream(outputType);
+  }
+
+  function onOutputTypeChange(next: 6 | 7) {
+    if (next === outputType) return;
+    if (!sessionId) {
+      setOutputType(next);
+      return;
+    }
+    void armStream(next);
   }
 
   async function stop() {
@@ -123,22 +181,6 @@ export function Scenario() {
       setMediaURL("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "stop failed");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function whoami() {
-    setBusy(true);
-    setGate("");
-    const headers = new Headers();
-    if (token.trim()) headers.set("Authorization", `Bearer ${token.trim()}`);
-    try {
-      const res = await fetch(`${origin}/`, { headers });
-      const body = (await res.json().catch(() => null)) as { message?: string } | null;
-      setGate(`${res.status} ${body?.message ?? ""}`.trim());
-    } catch (err) {
-      setGate(err instanceof Error ? err.message : "GET / failed");
     } finally {
       setBusy(false);
     }
@@ -170,10 +212,26 @@ export function Scenario() {
           </Button>
         </div>
         <label>
+          توکن JWT
+          <input
+            value={token}
+            readOnly={tokenReady}
+            spellCheck={false}
+            placeholder="روی «دریافت توکن» بزنید"
+            className={tokenReady ? "token-locked" : undefined}
+          />
+        </label>
+        <div className="row">
+          <Button type="button" disabled={busy || tokenReady} onClick={() => void fetchToken()}>
+            دریافت توکن
+          </Button>
+        </div>
+        <label>
           نوع خروجی
           <select
             value={outputType}
-            onChange={(event) => setOutputType(event.target.value === "7" ? 7 : 6)}
+            disabled={busy}
+            onChange={(event) => onOutputTypeChange(event.target.value === "7" ? 7 : 6)}
           >
             <option value={6}>LL-HLS</option>
             <option value={7}>WebRTC</option>
@@ -192,11 +250,12 @@ export function Scenario() {
           <div className="scenario-stage box" ref={viewRef}>
             <StreamPanel
               origin={origin}
-              mediaURL={mediaURL}
+              mediaURL={playMediaURL || mediaURL}
               outputType={outputType}
               playerURL={playerURL}
               liveError={liveError}
               outputs={streamOutputs}
+              viewKey={`${sessionId}-${outputType}`}
             />
             <PtzJoystick
               apiOrigin={origin}
@@ -207,22 +266,12 @@ export function Scenario() {
             />
           </div>
         ) : null}
-        <label>
-          توکن JWT
-          <input
-            value={token}
-            onChange={(event) => setToken(event.target.value)}
-            spellCheck={false}
-            placeholder="خالی = درخواست بدون Authorization"
-          />
-        </label>
-        <div className="row">
-          <Button type="button" disabled={busy} onClick={() => void whoami()}>
-            GET /
-          </Button>
-        </div>
-        {gate ? <p className="prose">{gate}</p> : null}
       </form>
+      {toast ? (
+        <div className="scenario-toast" role="alert">
+          {toast}
+        </div>
+      ) : null}
     </section>
   );
 }
