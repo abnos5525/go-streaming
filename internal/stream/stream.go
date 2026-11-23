@@ -511,13 +511,15 @@ func (s *session) want(my, typ int) bool {
 func (s *session) loop(my int) {
 	in := muxInput(s.url)
 	sniffed := false
-	if u := rtp.MulticastURL(s.url); u != nil {
+	if u := rtp.MediaURL(s.url); u != nil {
 		p := filepath.Join(dir, s.id, "in.sdp")
-		if mc, err := rtp.JoinMulticast(u); err != nil {
-			s.set("multicast join: " + err.Error())
-			logStream("WARN", s.id, s.url, "multicast join failed — falling back to remux: %v", err)
-			_ = os.WriteFile(p, []byte(rtp.SDP(u, "", "")), 0o644)
-			in = p
+		if mc, err := rtp.Open(u); err != nil {
+			s.set("udp open: " + err.Error())
+			logStream("WARN", s.id, s.url, "udp open failed — falling back to remux: %v", err)
+			if rtp.MulticastURL(s.url) != nil {
+				_ = os.WriteFile(p, []byte(rtp.SDP(u, "", "")), 0o644)
+				in = p
+			}
 		} else {
 			rp := rtp.RelayPort(s.id)
 			ru, _ := url.Parse(fmt.Sprintf("rtp://127.0.0.1:%d", rp))
@@ -528,6 +530,18 @@ func (s *session) loop(my int) {
 				in = p
 				sniffed = true
 				go s.sniff(my, mc, rp)
+				if localDemoFeed(s.url) {
+					go func() {
+						if !s.alive(my) {
+							return
+						}
+						if err := gstLaunchOK(); err != nil {
+							s.set("gst-launch-1.0 not in PATH (local demo)")
+							return
+						}
+						s.runFF(my, 0, gstBallFeedCmd(u.Hostname(), u.Port()))
+					}()
+				}
 			}
 		}
 	}

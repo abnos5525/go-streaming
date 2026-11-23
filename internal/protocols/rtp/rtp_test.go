@@ -27,6 +27,13 @@ func TestSDP(t *testing.T) {
 	if MulticastURL("rtsp://x/1") != nil || MulticastURL("udp://192.168.1.1:5") != nil {
 		t.Fatal("non-multicast accepted")
 	}
+	uc := MediaURL("udp://127.0.0.1:5600")
+	if uc == nil || uc.Port() != "5600" {
+		t.Fatalf("unicast: %v", uc)
+	}
+	if MediaURL("udp://224.2.0.1:5484") == nil {
+		t.Fatal("multicast must parse as MediaURL")
+	}
 }
 
 func TestParsePacket(t *testing.T) {

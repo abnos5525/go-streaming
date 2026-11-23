@@ -70,6 +70,7 @@ export const steps: DocStep[] = [
     plain: "منوی اصلی API را به Gin معرفی می‌کند؛ بخش استریم را به تابع بعدی می‌سپارد.",
     how: [
     "GET / با middleware احراز هویت.",
+    "GET /ptz WebSocket برای PTZ (مثل mobileservergo).",
     "سپس registerStream(r) برای همهٔ مسیرهای پخش."
     ],
     why: "جدا کردن root از stream خواندن کد را ساده می‌کند.",
@@ -384,6 +385,22 @@ export const steps: DocStep[] = [
     ],
     why: "اشتباه رایج: یکی دانستن signaling و رسانه — دو صفحهٔ جدا؛ هر دو لازم‌اند.",
     next: "→ پخش در React",
+  },
+  {
+    title: "PTZ روی WebSocket",
+    file: "internal/ptz/ws.go",
+    method: "ServeHTTP()",
+    phase: 11,
+    key: "کنترل دوربین مسیر جدا از overlay است؛ overlay فقط HTTP poll می‌ماند.",
+    plain: "بعد از Start، مرورگر به ws://host/ptz?id=… وصل می‌شود و JSON می‌فرستد. سرور ack برمی‌گرداند؛ در این رزومه فقط stub RPC در لاگ چاپ می‌شود.",
+    how: [
+    "Upgrade به WebSocket روی GET /ptz",
+    "پیام: {type:\"ptz:move\", x, y, zoom}",
+    "پاسخ: ptz:ack",
+    "سناریو React دکمه‌های جهت + Zoom دارد"
+    ],
+    why: "PTZ کنترل plane است؛ نباید روی همان سوکت RTP یا overlay قاطی شود.",
+    next: "→ Stop",
   },
   {
     title: "Stop و پاکسازی",

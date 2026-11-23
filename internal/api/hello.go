@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/abnos5525/go-streaming/internal/auth"
+	"github.com/abnos5525/go-streaming/internal/ptz"
 	"github.com/gin-gonic/gin"
 )
 
@@ -14,4 +15,5 @@ func Register(r *gin.Engine) {
 	registerStream(r)
 	registerDemo(r)
 	registerVendor(r)
+	r.GET("/ptz", func(c *gin.Context) { ptz.ServeHTTP(c.Writer, c.Request) })
 }

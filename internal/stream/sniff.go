@@ -118,13 +118,14 @@ func (s *session) sniff(my int, mc *net.UDPConn, _ int) {
 		}
 		if mc == nil {
 			mu.Lock()
-			u := rtp.MulticastURL(s.url)
+			raw := s.url
 			mu.Unlock()
+			u := rtp.MediaURL(raw)
 			if u == nil {
 				return
 			}
 			var err error
-			mc, err = rtp.JoinMulticast(u)
+			mc, err = rtp.Open(u)
 			if err != nil {
 				s.set(err.Error())
 				time.Sleep(time.Second)

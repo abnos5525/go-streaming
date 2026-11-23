@@ -3,6 +3,7 @@
 package stream
 
 import (
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
@@ -13,6 +14,35 @@ import (
 
 	"github.com/abnos5525/go-streaming/internal/protocols/rtp"
 )
+
+const localDemoPort = "5600"
+
+// LocalDemoUDP is the scenario «تصویر محلی» ball feed; the server publishes it on Start.
+const LocalDemoUDP = "udp://127.0.0.1:" + localDemoPort
+
+func localDemoFeed(raw string) bool {
+	u := rtp.MediaURL(raw)
+	if u == nil || u.Port() != localDemoPort {
+		return false
+	}
+	ip := net.ParseIP(u.Hostname())
+	return ip != nil && (ip.IsLoopback() || ip.Equal(net.IPv4zero))
+}
+
+func gstBallFeedCmd(host, port string) *exec.Cmd {
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	args := []string{
+		"-q", "-e",
+		"videotestsrc", "is-live=true", "pattern=ball",
+		"!", "video/x-raw,width=640,height=360,framerate=25/1",
+		"!", "x264enc", "tune=zerolatency", "bitrate=800", "speed-preset=ultrafast", "key-int-max=25",
+		"!", "rtph264pay", "pt=96", "config-interval=1",
+		"!", "udpsink", "host=" + host, "port=" + port, "sync=false", "async=false",
+	}
+	return gstCmd(args)
+}
 
 func gstLaunchOK() error {
 	_, err := gstLaunchPath()

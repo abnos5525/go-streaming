@@ -3,6 +3,7 @@
 package rtp
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/url"
@@ -182,8 +183,8 @@ func listenOne(addr *net.UDPAddr) (*net.UDPConn, error) {
 	return c, nil
 }
 
-// MulticastURL parses udp/rtp URLs that point at a multicast group.
-func MulticastURL(raw string) *url.URL {
+// MediaURL parses udp/rtp URLs with host:port (multicast or unicast).
+func MediaURL(raw string) *url.URL {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return nil
@@ -191,11 +192,62 @@ func MulticastURL(raw string) *url.URL {
 	if u.Scheme != "udp" && u.Scheme != "rtp" {
 		return nil
 	}
+	if u.Hostname() == "" || u.Port() == "" {
+		return nil
+	}
+	return u
+}
+
+// MulticastURL parses udp/rtp URLs that point at a multicast group.
+func MulticastURL(raw string) *url.URL {
+	u := MediaURL(raw)
+	if u == nil {
+		return nil
+	}
 	ip := net.ParseIP(u.Hostname())
 	if ip == nil || !ip.IsMulticast() {
 		return nil
 	}
 	return u
+}
+
+// Open binds UDP for a media URL: IGMP join for multicast, :port for unicast.
+func Open(u *url.URL) (*net.UDPConn, error) {
+	if u == nil {
+		return nil, fmt.Errorf("nil url")
+	}
+	if ip := net.ParseIP(u.Hostname()); ip != nil && ip.IsMulticast() {
+		return JoinMulticast(u)
+	}
+	return listenUnicast(u)
+}
+
+func listenUnicast(u *url.URL) (*net.UDPConn, error) {
+	host := "0.0.0.0"
+	if ip := net.ParseIP(u.Hostname()); ip != nil {
+		switch {
+		case ip.IsLoopback(), ip.IsUnspecified():
+			host = ip.String()
+		case ifaceByIP(ip.String()) != nil:
+			host = ip.String()
+		}
+	}
+	addr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(host, u.Port()))
+	if err != nil {
+		return nil, err
+	}
+	lc := net.ListenConfig{Control: reuseAddrControl}
+	pc, err := lc.ListenPacket(context.Background(), "udp4", addr.String())
+	if err != nil {
+		return nil, err
+	}
+	c, ok := pc.(*net.UDPConn)
+	if !ok {
+		_ = pc.Close()
+		return nil, fmt.Errorf("udp listen: unexpected conn type")
+	}
+	_ = c.SetReadBuffer(4 << 20)
+	return c, nil
 }
 
 // Parse splits an RTP datagram into payload + header-extension bytes.

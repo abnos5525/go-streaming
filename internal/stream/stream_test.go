@@ -14,6 +14,18 @@ import (
 	"github.com/abnos5525/go-streaming/internal/stream/ai"
 )
 
+func TestLocalDemoFeed(t *testing.T) {
+	if !localDemoFeed(LocalDemoUDP) {
+		t.Fatal("local demo url")
+	}
+	if localDemoFeed("udp://224.2.0.1:5600") {
+		t.Fatal("multicast must not auto-feed")
+	}
+	if localDemoFeed("rtsp://x") {
+		t.Fatal("rtsp")
+	}
+}
+
 func TestStopNotRunning(t *testing.T) {
 	if err := Stop("udp://224.2.0.1:5484"); err == nil {
 		t.Fatal("want error")

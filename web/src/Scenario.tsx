@@ -1,12 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { LiveView } from "@/LiveView";
+import { PtzJoystick } from "@/components/PtzJoystick";
+import { StreamPanel } from "@/components/StreamPanel";
+import { apiBaseURL } from "@/config/api";
+import type { PtzAck } from "@/ptzSocket";
 
 type StartBody = { url: string; output_type: number };
-
-const defaultAPI = "http://127.0.0.1:8085";
 const demoCamera = "rtsp://stream.strba.sk:1935/strba/VYHLAD_JAZERO.stream";
-const localCamera = "udp://127.0.0.1:5600";
+const localCamera = "udp://127.0.0.1:5600"; // server starts ball feed on Start; GST_ROOT in .env
 
 function streamId(mediaURL: string) {
   return mediaURL.match(/\/(?:hls|webrtc)\/([0-9a-f]{16})\//i)?.[1] ?? "";
@@ -24,7 +25,6 @@ async function apiError(res: Response) {
 }
 
 export function Scenario() {
-  const [api, setApi] = useState(defaultAPI);
   const [source, setSource] = useState(demoCamera);
   const [outputType, setOutputType] = useState<6 | 7>(6);
   const [mediaURL, setMediaURL] = useState("");
@@ -32,11 +32,24 @@ export function Scenario() {
   const [token, setToken] = useState("");
   const [gate, setGate] = useState("");
   const [liveError, setLiveError] = useState("");
+  const [streamLive, setStreamLive] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [ptzOut, setPtzOut] = useState<PtzAck | null>(null);
   const viewRef = useRef<HTMLDivElement>(null);
 
-  const origin = api.replace(/\/$/, "");
-  const player = mediaURL ? playURL(mediaURL) : "";
+  const origin = apiBaseURL;
+  const playerURL = mediaURL ? playURL(mediaURL) : "";
+  const sessionId = streamId(mediaURL);
+
+  const onPtzOutput = useCallback((ack: PtzAck) => {
+    setPtzOut(ack);
+  }, []);
+
+  const streamOutputs = useMemo(() => (ptzOut ? { ptz: ptzOut } : undefined), [ptzOut]);
+
+  useEffect(() => {
+    if (!sessionId) setPtzOut(null);
+  }, [sessionId]);
 
   useEffect(() => {
     const ac = new AbortController();
@@ -51,16 +64,22 @@ export function Scenario() {
 
   useEffect(() => {
     const id = streamId(mediaURL);
-    if (!id) return;
-    const timer = window.setInterval(() => {
+    if (!id) {
+      setStreamLive(false);
+      return;
+    }
+    const meta = () => {
       void fetch(`${origin}/stream/meta/${id}`)
         .then(async (res) => {
           if (!res.ok) return;
-          const meta = (await res.json()) as { error?: string };
-          setLiveError(meta.error ?? "");
+          const body = (await res.json()) as { error?: string; ready?: boolean };
+          setLiveError(body.error ?? "");
+          setStreamLive(body.ready === true);
         })
         .catch(() => undefined);
-    }, 2000);
+    };
+    meta();
+    const timer = window.setInterval(meta, 2000);
     return () => window.clearInterval(timer);
   }, [mediaURL, origin]);
 
@@ -138,14 +157,10 @@ export function Scenario() {
           سرور Go باید روی پورت ۸۰۸۵ بالا باشد. Start همان قرارداد واقعی API را صدا می‌زند.
         </p>
         <label>
-          آدرس API
-          <input value={api} onChange={(event) => setApi(event.target.value)} spellCheck={false} />
-        </label>
-        <label>
           آدرس منبع
           <input value={source} onChange={(event) => setSource(event.target.value)} spellCheck={false} />
         </label>
-        <p className="world-hint">آدرس پیش‌فرض دوربین عمومی دریاچهٔ شتربا است. Start همان تصویر زنده را پخش می‌کند. دکمهٔ تصویر محلی توپ آزمایشی را می‌گذارد.</p>
+        <p className="world-hint">آدرس پیش‌فرض دوربین عمومی دریاچه است. Start همان تصویر زنده را پخش می‌کند. دکمهٔ تصویر محلی توپ آزمایشی را می‌گذارد.</p>
         <div className="row">
           <Button type="button" disabled={busy} onClick={() => setSource(demoCamera)}>
             دوربین دریاچه
@@ -160,8 +175,8 @@ export function Scenario() {
             value={outputType}
             onChange={(event) => setOutputType(event.target.value === "7" ? 7 : 6)}
           >
-            <option value={6}>۶ · LL-HLS</option>
-            <option value={7}>۷ · WebRTC</option>
+            <option value={6}>LL-HLS</option>
+            <option value={7}>WebRTC</option>
           </select>
         </label>
         <div className="row">
@@ -174,13 +189,22 @@ export function Scenario() {
         </div>
         {error ? <p className="err">{error}</p> : null}
         {mediaURL ? (
-          <div className="box" ref={viewRef}>
-            <h4>پاسخ سرور</h4>
-            <p className="prose">
-              <a href={mediaURL}>{mediaURL}</a>
-            </p>
-            {player ? <LiveView origin={origin} mediaURL={mediaURL} outputType={outputType} /> : null}
-            {liveError ? <p className="err">{liveError}</p> : null}
+          <div className="scenario-stage box" ref={viewRef}>
+            <StreamPanel
+              origin={origin}
+              mediaURL={mediaURL}
+              outputType={outputType}
+              playerURL={playerURL}
+              liveError={liveError}
+              outputs={streamOutputs}
+            />
+            <PtzJoystick
+              apiOrigin={origin}
+              streamId={sessionId}
+              disabled={!sessionId}
+              streamLive={streamLive}
+              onOutput={onPtzOutput}
+            />
           </div>
         ) : null}
         <label>

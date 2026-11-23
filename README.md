@@ -20,6 +20,7 @@ No lock on stream routes. `GET /` checks an HS256 JWT only when `AUTH_SECRET` is
 | WebRTC (pion) | `7` | `/webrtc/{id}/offer` |
 | Built-in player | — | `/play/{id}` |
 | Overlay JSON | — | `/stream/overlay/{id}` |
+| PTZ (WebSocket) | — | `GET /ptz?id={id}` |
 | OpenAPI UI | — | `/api/doc` |
 
 Starting a stream with type `6` or `7` arms **both** lanes on the same ingest. `/play/{id}` shows the **latest** type you requested.
@@ -130,6 +131,7 @@ curl -s -X POST http://127.0.0.1:8085/stream/stop \
 | `POST` | `/webrtc/{id}/viewers` | Allocate viewer slot |
 | `POST` | `/webrtc/{id}/v/{viewer}/offer` | SDP offer → answer |
 | `GET` | `/play/{id}` | Built-in HTML player |
+| `WS` | `/ptz?id={session_id}` | JSON `{"type":"ptz:move","x","y","zoom"}` → `ptz:ack` (stub RPC) |
 | `GET` | `/api/doc` | Swagger UI |
 
 Allowed URL schemes: `udp`, `rtp`, `rtsp`, `rtsps`.
@@ -176,6 +178,16 @@ grpcurl -plaintext 127.0.0.1:9095 stream.v1.Control/Status
 ```
 
 `output_type` is `6` (LL-HLS) or `7` (WebRTC). Stop uses the same source URL.
+
+### WebSocket PTZ (stub)
+
+After **Start**, open `ws://127.0.0.1:8085/ptz?id={session_id}` (same 16-hex id as HLS/WebRTC paths). Send:
+
+```json
+{"type":"ptz:move","x":0,"y":1,"zoom":0,"deviceId":"optional"}
+```
+
+The server replies with a JSON ack and logs `[ptz]` (no real camera RPC in this repo). The docs **scenario** page connects automatically and shows directional buttons after a successful Start. Overlay stays HTTP poll — not WebSocket.
 
 ### Demo camera
 
